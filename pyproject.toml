@@ -1,0 +1,13 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lite-sandbox"
+version = "0.1.0"
+description = "Lightweight Linux namespace sandbox with persistent shell and instant reset"
+requires-python = ">=3.10"
+license = "MIT"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lite_sandbox"]
