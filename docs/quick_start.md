@@ -6,10 +6,11 @@
 pip install -e .
 ```
 
-Requires Linux, root (for namespace/mount), and `util-linux` (`unshare`).
-Docker is only needed if you pass a Docker image name (auto-exports and caches the rootfs).
+**Root mode** requires Linux, root, and `util-linux` (`unshare`). Docker is only needed for auto-exporting rootfs from image names.
 
-## Basic usage
+**Rootless mode** works without root — requires Linux kernel 5.13+ (Landlock). No Docker, no special privileges.
+
+## Basic usage (root mode)
 
 ```python
 from agentdocker_lite import Sandbox, SandboxConfig
@@ -35,7 +36,57 @@ sb.reset()
 sb.delete()
 ```
 
-## Volumes
+## Rootless mode (no root required)
+
+When not running as root, the sandbox automatically falls back to Landlock + seccomp — no namespace, no chroot, no overlayfs. The process runs directly in the working directory with kernel-level filesystem restrictions.
+
+```python
+from agentdocker_lite import Sandbox, SandboxConfig
+
+# No image needed — runs on the host filesystem
+config = SandboxConfig(
+    working_dir="/tmp/my-sandbox",
+)
+sb = Sandbox(config, name="worker-0")
+
+output, ec = sb.run("echo hello && whoami && pwd")
+# hello
+# myuser
+# /tmp/my-sandbox
+
+# Landlock auto-enabled: read anywhere, write only to cwd + /tmp + /dev
+sb.run("echo ok > /tmp/my-sandbox/test.txt")   # ✓ allowed
+sb.run("echo bad > /etc/test")                  # ✗ Permission denied
+
+sb.delete()
+```
+
+Default Landlock policy (when not explicitly configured):
+- **Read**: `/` (entire filesystem)
+- **Write**: working dir + `/tmp` + `/dev`
+- **seccomp**: enabled (blocks ptrace, mount, kexec, bpf, etc.)
+
+Custom Landlock policy:
+
+```python
+config = SandboxConfig(
+    working_dir="/tmp/my-sandbox",
+    landlock_read=["/usr", "/lib", "/etc", "/tmp/my-sandbox"],
+    landlock_write=["/tmp/my-sandbox"],
+    landlock_tcp_ports=[80, 443],     # only allow outbound HTTP/HTTPS
+)
+```
+
+| | Root mode | Rootless mode |
+|---|---|---|
+| Isolation | PID + mount namespace + chroot | Landlock + seccomp |
+| Filesystem | overlayfs COW | host fs (Landlock restricts paths) |
+| `reset()` | clears overlayfs upper (~27ms) | no-op |
+| `image` required | yes | no |
+| Docker required | only for image export | no |
+| Kernel requirement | overlayfs support | 5.13+ (Landlock) |
+
+## Volumes (root mode only)
 
 Three mount modes:
 
@@ -76,7 +127,7 @@ response = proc.stdout.readline()
 proc.terminate()
 ```
 
-## Resource limits (cgroup v2)
+## Resource limits (cgroup v2, root mode only)
 
 ```python
 config = SandboxConfig(
@@ -113,31 +164,33 @@ for sb in sandboxes:
 
 ## Security hardening
 
-### seccomp-bpf (enabled by default)
+### seccomp-bpf (enabled by default, both modes)
 
-Blocks dangerous syscalls (ptrace, mount, kexec, bpf, unshare, setns) inside the sandbox. Prevents sandbox escape via privilege escalation.
+Blocks 30+ dangerous syscalls inside the sandbox: ptrace, mount, kexec, bpf, unshare, setns, init_module, reboot, perf_event_open, etc. Also blocks `clone()` with namespace flags and `ioctl(TIOCSTI)` terminal injection. Wrong architecture (x32 ABI) → process killed.
 
 ```python
 config = SandboxConfig(
     image="ubuntu:22.04",
-    seccomp=True,  # default, block dangerous syscalls
+    seccomp=True,  # default
 )
 ```
 
 ### Landlock (filesystem + network restrictions)
 
-Restrict which paths the sandbox can read/write, and which TCP ports it can connect to. Requires kernel 5.13+ (filesystem) / 6.7+ (network).
+Restrict which paths the sandbox can read/write, and which TCP ports it can connect to. Auto-enabled in rootless mode. Optional in root mode (defense-in-depth).
+
+Requires kernel 5.13+ (filesystem), 5.19+ (cross-dir rename protection), 6.7+ (network), 6.12+ (IPC scoping). ABI version auto-negotiated — features degrade gracefully on older kernels.
 
 ```python
 config = SandboxConfig(
     image="ubuntu:22.04",
-    landlock_read=["/usr", "/lib", "/etc"],   # read-only paths
-    landlock_write=["/tmp", "/workspace"],     # read-write paths
-    landlock_tcp_ports=[80, 443, 8080],        # allowed outbound TCP ports
+    landlock_read=["/usr", "/lib", "/etc"],
+    landlock_write=["/tmp", "/workspace"],
+    landlock_tcp_ports=[80, 443, 8080],
 )
 ```
 
-### Device passthrough
+### Device passthrough (root mode only)
 
 ```python
 config = SandboxConfig(
@@ -148,7 +201,7 @@ config = SandboxConfig(
 
 ## Performance comparison
 
-| | Docker | agentdocker-lite | Speedup |
+| | Docker | agentdocker-lite (root) | Speedup |
 |---|---|---|---|
 | Create | ~271ms | ~10ms | **27x** |
 | Per command (avg) | ~22ms | ~11ms | **2x** |
