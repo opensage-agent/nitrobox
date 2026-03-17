@@ -102,6 +102,7 @@ class RootfulSandbox(SandboxBase):
             "cpu_max": config.cpu_max,
             "memory_max": config.memory_max,
             "pids_max": config.pids_max,
+            "io_max": config.io_max,
         }
 
         # --- setup --------------------------------------------------------
@@ -126,9 +127,24 @@ class RootfulSandbox(SandboxBase):
             wd = self._rootfs / config.working_dir.lstrip("/")
             wd.mkdir(parents=True, exist_ok=True)
 
+        # Write custom DNS config
+        if config.dns:
+            self._write_dns(config.dns)
+
         # Write seccomp helper into rootfs (called from init_script inside chroot)
         if config.seccomp:
             self._write_seccomp_helper()
+
+        # Read-only rootfs: bind-mount on itself then remount ro
+        if config.read_only:
+            subprocess.run(
+                ["mount", "--bind", str(self._rootfs), str(self._rootfs)],
+                capture_output=True,
+            )
+            subprocess.run(
+                ["mount", "-o", "remount,ro,bind", str(self._rootfs)],
+                capture_output=True,
+            )
 
         self._shell = self._detect_shell()
         self._cached_env = self._build_env()
@@ -146,6 +162,7 @@ class RootfulSandbox(SandboxBase):
             landlock_read=config.landlock_read,
             landlock_write=config.landlock_write,
             landlock_tcp_ports=config.landlock_tcp_ports,
+            hostname=config.hostname,
         )
         shell_ms = (time.monotonic() - t3) * 1000
 
@@ -212,6 +229,7 @@ class RootfulSandbox(SandboxBase):
             "cpu_max": config.cpu_max,
             "memory_max": config.memory_max,
             "pids_max": config.pids_max,
+            "io_max": config.io_max,
         }
 
         # --- cgroup via systemd delegation --------------------------------
@@ -222,6 +240,7 @@ class RootfulSandbox(SandboxBase):
                     "cpu_max": "CPUQuota",
                     "memory_max": "MemoryMax",
                     "pids_max": "TasksMax",
+                    "io_max": "IOWriteBandwidthMax",
                 }
                 for key, sd_prop in prop_map.items():
                     value = self._cgroup_limits.get(key)
@@ -232,6 +251,11 @@ class RootfulSandbox(SandboxBase):
                             if len(parts) == 2:
                                 pct = int(int(parts[0]) / int(parts[1]) * 100)
                                 self._systemd_scope_properties.append(f"{sd_prop}={pct}%")
+                        elif key == "io_max":
+                            # io_max is raw cgroup format "MAJ:MIN wbps=N"
+                            # systemd uses "IOWriteBandwidthMax=/dev/X N"
+                            # Pass as-is; user must use systemd format
+                            self._systemd_scope_properties.append(f"{sd_prop}={value}")
                         else:
                             self._systemd_scope_properties.append(f"{sd_prop}={value}")
                 logger.debug(
@@ -252,6 +276,10 @@ class RootfulSandbox(SandboxBase):
         # --- seccomp helper in upper dir ----------------------------------
         if config.seccomp:
             self._write_seccomp_helper_userns()
+
+        # --- DNS ----------------------------------------------------------
+        if config.dns:
+            self._write_dns(config.dns)
 
         # --- working dir in upper dir -------------------------------------
         if config.working_dir and config.working_dir != "/":
@@ -276,6 +304,7 @@ class RootfulSandbox(SandboxBase):
             seccomp=config.seccomp,
             userns_setup_script=str(setup_script_path),
             systemd_scope_properties=self._systemd_scope_properties or None,
+            hostname=config.hostname,
         )
         shell_ms = (time.monotonic() - t0) * 1000
 
@@ -317,6 +346,15 @@ class RootfulSandbox(SandboxBase):
             "# Mount overlayfs",
             f"mount -t overlay overlay "
             f"-o lowerdir={base},upperdir={upper},workdir={work} {merged}",
+        ]
+
+        # Read-only rootfs: bind + remount ro BEFORE other mounts.
+        # Mounts added afterwards (/proc, /dev, volumes) are on top and stay rw.
+        if self._config.read_only:
+            lines.append(f"mount --bind {merged} {merged}")
+            lines.append(f"mount -o remount,ro,bind {merged}")
+
+        lines.extend([
             "",
             "# Mount /proc",
             f"mount -t proc proc {merged}/proc",
@@ -327,7 +365,7 @@ class RootfulSandbox(SandboxBase):
             "",
             "# Setup /dev (bind mount from host -- mknod not available in userns)",
             f"mount -t tmpfs -o nosuid,mode=0755 tmpfs {merged}/dev",
-        ]
+        ])
 
         for dev in ["null", "zero", "full", "random", "urandom", "tty"]:
             lines.append(f"touch {merged}/dev/{dev} 2>/dev/null || true")
@@ -650,6 +688,13 @@ class RootfulSandbox(SandboxBase):
                 self._rootfs,
             )
 
+    def _write_dns(self, dns_servers: list[str]) -> None:
+        """Write custom /etc/resolv.conf into the sandbox rootfs."""
+        resolv = self._host_path_write("/etc/resolv.conf")
+        resolv.parent.mkdir(parents=True, exist_ok=True)
+        content = "".join(f"nameserver {s}\n" for s in dns_servers)
+        resolv.write_text(content)
+
     # ------------------------------------------------------------------ #
     #  Filesystem -- overlayfs                                             #
     # ------------------------------------------------------------------ #
@@ -873,6 +918,7 @@ class RootfulSandbox(SandboxBase):
                     ("cpu_max", "cpu"),
                     ("memory_max", "memory"),
                     ("pids_max", "pids"),
+                    ("io_max", "io"),
                 ]:
                     if self._cgroup_limits.get(key):
                         try:
@@ -888,6 +934,7 @@ class RootfulSandbox(SandboxBase):
             "cpu_max": "cpu.max",
             "memory_max": "memory.max",
             "pids_max": "pids.max",
+            "io_max": "io.max",
         }
         for key, filename in limit_files.items():
             value = self._cgroup_limits.get(key)

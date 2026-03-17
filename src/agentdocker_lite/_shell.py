@@ -47,6 +47,7 @@ class _PersistentShell:
         landlock_tcp_ports: Optional[list[int]] = None,
         userns_setup_script: Optional[str] = None,
         systemd_scope_properties: Optional[list[str]] = None,
+        hostname: Optional[str] = None,
     ):
         self._rootfs = rootfs
         self._shell = shell
@@ -62,6 +63,7 @@ class _PersistentShell:
         self._userns = userns_setup_script is not None
         self._userns_setup_script = userns_setup_script
         self._systemd_scope_properties = systemd_scope_properties
+        self._hostname = hostname
         self._process: Optional[subprocess.Popen] = None
         self._master_fd: Optional[int] = None
         self._lock = threading.Lock()
@@ -184,12 +186,17 @@ class _PersistentShell:
             "done\n"
             if self._seccomp else ""
         )
+        _hostname_snippet = (
+            f"hostname {shlex.quote(self._hostname)} 2>/dev/null\n"
+            if self._hostname else ""
+        )
 
         if self._userns:
             # User namespace: setup script already did mount/dev/chroot.
             # This runs inside the chroot bash (read from stdin pipe).
             init_script = (
                 "PS1='' PS2=''\n"
+                + _hostname_snippet
                 + _seccomp_snippet
                 + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"echo 0 >&{self._signal_fd}\n"
@@ -215,6 +222,7 @@ class _PersistentShell:
                 "ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null\n"
                 "ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null\n"
                 "mkdir -p /dev/pts /dev/shm 2>/dev/null\n"
+                + _hostname_snippet
                 + _seccomp_snippet
                 + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"echo 0 >&{self._signal_fd}\n"

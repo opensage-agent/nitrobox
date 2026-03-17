@@ -58,6 +58,15 @@ class SandboxConfig:
         landlock_write: Paths allowed for read-write access under Landlock.
         landlock_tcp_ports: TCP ports allowed for connect under Landlock.
             ``None`` means no network restriction.
+        hostname: Hostname inside the sandbox (UTS namespace).
+            ``None`` uses the host's hostname.
+        dns: Custom DNS servers (e.g. ``["8.8.8.8", "1.1.1.1"]``).
+            Writes ``/etc/resolv.conf`` inside the sandbox.
+            ``None`` inherits from host.
+        read_only: Make the root filesystem read-only.  Writes are
+            only allowed to volumes and tmpfs mounts.
+        io_max: cgroup v2 ``io.max`` value for disk I/O throttling
+            (e.g. ``"259:0 wbps=10485760"`` for 10MB/s write on device 259:0).
     """
 
     image: str = ""
@@ -71,9 +80,13 @@ class SandboxConfig:
     cpu_max: Optional[str] = None
     memory_max: Optional[str] = None
     pids_max: Optional[str] = None
+    io_max: Optional[str] = None
     tty: bool = False
     net_isolate: bool = False
     seccomp: bool = True
+    hostname: Optional[str] = None
+    dns: Optional[list[str]] = None
+    read_only: bool = False
     landlock_read: Optional[list[str]] = None
     landlock_write: Optional[list[str]] = None
     landlock_tcp_ports: Optional[list[int]] = None
