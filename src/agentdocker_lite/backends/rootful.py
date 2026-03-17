@@ -365,7 +365,7 @@ class RootfulSandbox(SandboxBase):
             # sysfs only works in userns when network namespace is also new
             f"mount -t sysfs sysfs {merged}/sys 2>/dev/null || true"
             if self._config.net_isolate else
-            f"# /sys: skipped (requires net_isolate=True in userns)",
+            "# /sys: skipped (requires net_isolate=True in userns)",
             "",
             "# Setup /dev (bind mount from host -- mknod not available in userns)",
             f"mount -t tmpfs -o nosuid,mode=0755 tmpfs {merged}/dev",

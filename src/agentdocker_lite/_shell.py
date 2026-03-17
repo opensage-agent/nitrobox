@@ -230,10 +230,10 @@ class _PersistentShell:
         self._write_input(init_script.encode())
 
         # Wait for the init signal.
-        ec_str = self._read_signal(timeout=10)
+        ec_str = self._read_signal(timeout=30)
         if ec_str is None:
             raise RuntimeError(
-                f"Persistent shell failed to start within 10 s "
+                f"Persistent shell failed to start within 30 s "
                 f"(rootfs={self._rootfs}, shell={self._shell})"
             )
 
