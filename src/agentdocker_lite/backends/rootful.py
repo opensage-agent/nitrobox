@@ -167,6 +167,8 @@ class RootfulSandbox(SandboxBase):
         shell_ms = (time.monotonic() - t3) * 1000
 
         self._bg_handles: dict[str, str] = {}  # handle -> pid
+        self._pasta_process = None
+        self._start_pasta()
 
         # Write PID file for stale sandbox cleanup
         pid_file = self._env_dir / ".pid"
@@ -309,6 +311,8 @@ class RootfulSandbox(SandboxBase):
         shell_ms = (time.monotonic() - t0) * 1000
 
         self._bg_handles: dict[str, str] = {}
+        self._pasta_process = None
+        self._start_pasta()
 
         # Write PID file for stale sandbox cleanup
         pid_file = self._env_dir / ".pid"
@@ -466,6 +470,7 @@ class RootfulSandbox(SandboxBase):
         This is the RL fast-path: ~27ms for overlayfs, ~28ms for btrfs.
         """
         self._bg_handles.clear()
+        self._stop_pasta()
         t0 = time.monotonic()
 
         self._persistent_shell.kill()
@@ -508,6 +513,7 @@ class RootfulSandbox(SandboxBase):
                 wd.mkdir(parents=True, exist_ok=True)
 
         self._persistent_shell.start()
+        self._start_pasta()
 
         elapsed_ms = (time.monotonic() - t0) * 1000
         logger.debug("Environment reset (%.3fms): %s", elapsed_ms, self._env_dir)
@@ -516,6 +522,7 @@ class RootfulSandbox(SandboxBase):
         """Delete the sandbox and clean up all resources."""
         t0 = time.monotonic()
 
+        self._stop_pasta()
         self._persistent_shell.kill()
 
         if not self._userns:
@@ -1017,6 +1024,53 @@ class RootfulSandbox(SandboxBase):
                 f"btrfs snapshot failed on reset: {result.stderr.strip()}"
             )
         self._btrfs_active = True
+
+    # ------------------------------------------------------------------ #
+    #  Pasta networking                                                    #
+    # ------------------------------------------------------------------ #
+
+    def _start_pasta(self) -> None:
+        """Start pasta for NAT'd networking with port mapping.
+
+        Attaches to the sandbox's network namespace.  Requires
+        ``net_isolate=True`` (separate network namespace) and the
+        ``pasta`` binary from the ``passt`` package.
+        """
+        port_map = self._config.port_map
+        if not port_map:
+            return
+        if not self._config.net_isolate:
+            logger.warning("port_map requires net_isolate=True; ignoring port_map")
+            return
+        if not shutil.which("pasta"):
+            raise FileNotFoundError(
+                "port_map requires 'pasta' (from the passt package). "
+                "Install: pacman -S passt / apt install passt"
+            )
+
+        shell_pid = self._persistent_shell._process.pid
+        cmd: list[str] = ["pasta", "--config-net", "-q"]
+        for mapping in port_map:
+            # "8080:80" → -t 8080:80 (TCP), -u for UDP
+            cmd.extend(["-t", mapping])
+        cmd.append(str(shell_pid))
+
+        self._pasta_process = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        logger.debug("pasta started: pid=%d, ports=%s", self._pasta_process.pid, port_map)
+
+    def _stop_pasta(self) -> None:
+        """Stop the pasta networking process."""
+        proc = getattr(self, "_pasta_process", None)
+        if proc and proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except Exception:
+                proc.kill()
+                proc.wait(timeout=2)
+        self._pasta_process = None
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #

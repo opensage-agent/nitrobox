@@ -67,6 +67,9 @@ class SandboxConfig:
             only allowed to volumes and tmpfs mounts.
         io_max: cgroup v2 ``io.max`` value for disk I/O throttling
             (e.g. ``"259:0 wbps=10485760"`` for 10MB/s write on device 259:0).
+        port_map: Port mappings as ``["host_port:container_port", ...]``.
+            Requires ``pasta`` (from the ``passt`` package). Automatically
+            enables network isolation with NAT'd internet access.
     """
 
     image: str = ""
@@ -87,6 +90,7 @@ class SandboxConfig:
     hostname: Optional[str] = None
     dns: Optional[list[str]] = None
     read_only: bool = False
+    port_map: Optional[list[str]] = None
     landlock_read: Optional[list[str]] = None
     landlock_write: Optional[list[str]] = None
     landlock_tcp_ports: Optional[list[int]] = None
@@ -396,6 +400,68 @@ class SandboxBase(abc.ABC):
     def delete(self) -> None:
         """Delete the sandbox and clean up all resources."""
         ...
+
+    def snapshot(self, path: str) -> None:
+        """Save current filesystem state to a directory.
+
+        Copies the overlayfs upper layer (all changes since creation/reset)
+        to *path*.  Use :meth:`restore` to return to this state later.
+        Does not capture running process state (use CRIU for that).
+
+        Args:
+            path: Directory to save the snapshot to (must not exist).
+        """
+        upper = getattr(self, "_upper_dir", None)
+        if not upper or not upper.exists():
+            raise RuntimeError("snapshot() requires overlayfs (not available in this mode)")
+        shutil.copytree(str(upper), path)
+        logger.debug("Snapshot saved: %s -> %s", upper, path)
+
+    def restore(self, path: str) -> None:
+        """Restore filesystem state from a snapshot.
+
+        Kills the persistent shell, replaces the overlayfs upper layer
+        with the snapshot, and restarts the shell.
+
+        Args:
+            path: Directory containing a previous :meth:`snapshot`.
+        """
+        upper = getattr(self, "_upper_dir", None)
+        if not upper:
+            raise RuntimeError("restore() requires overlayfs (not available in this mode)")
+        if not Path(path).exists():
+            raise FileNotFoundError(f"Snapshot not found: {path}")
+
+        self._persistent_shell.kill()
+
+        # Clear upper and replace with snapshot
+        if self._userns:
+            for child in upper.iterdir():
+                try:
+                    child.chmod(0o700)
+                except OSError:
+                    pass
+        if upper.exists():
+            shutil.rmtree(upper)
+        shutil.copytree(path, str(upper))
+
+        # Clear work dir
+        work = getattr(self, "_work_dir", None)
+        if work and work.exists():
+            if self._userns:
+                for child in work.iterdir():
+                    try:
+                        child.chmod(0o700)
+                    except OSError:
+                        pass
+            shutil.rmtree(work)
+            work.mkdir(parents=True)
+
+        if self._config.seccomp and self._userns:
+            self._write_seccomp_helper_userns()
+
+        self._persistent_shell.start()
+        logger.debug("Snapshot restored: %s -> %s", path, upper)
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
