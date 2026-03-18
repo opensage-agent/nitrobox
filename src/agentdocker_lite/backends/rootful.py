@@ -456,11 +456,17 @@ class RootfulSandbox(SandboxBase):
                 if mode == "ro":
                     lines.append(f"mount -o remount,ro,bind {target}")
 
-        # Enter chroot — use adl-seccomp wrapper for cap drop + seccomp
+        # Enter chroot — try adl-seccomp wrapper, fallback to plain shell.
+        # adl-seccomp may fail in restricted environments (e.g. GitHub Actions
+        # user namespaces where exec of static binaries is blocked).
         if self._config.seccomp:
             lines.extend([
                 "",
-                f"exec chroot {merged} /tmp/.adl_seccomp {shell}{norc}",
+                f"if [ -x {merged}/tmp/.adl_seccomp ]; then",
+                f"  exec chroot {merged} /tmp/.adl_seccomp {shell}{norc}",
+                "else",
+                f"  exec chroot {merged} {shell}{norc}",
+                "fi",
             ])
         else:
             lines.extend([
