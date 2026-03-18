@@ -343,10 +343,11 @@ LANDLOCK_SCOPE_SIGNAL = 1 << 1
 LANDLOCK_RULE_PATH_BENEATH = 1
 LANDLOCK_RULE_NET_PORT = 2
 
-# Flags for landlock_restrict_self (ABI v7, kernel 6.15)
-LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF = 1 << 0
-LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON = 1 << 1
-LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF = 1 << 2
+# Flags for landlock_restrict_self
+LANDLOCK_RESTRICT_SELF_LOG_SAME_EXEC_OFF = 1 << 0   # ABI v7, kernel 6.15
+LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON = 1 << 1     # ABI v7
+LANDLOCK_RESTRICT_SELF_LOG_SUBDOMAINS_OFF = 1 << 2  # ABI v7
+LANDLOCK_RESTRICT_SELF_TSYNC = 1 << 3               # ABI v8, kernel 6.18
 
 # Permission sets
 FS_READ = (
@@ -505,14 +506,17 @@ def apply_landlock(
 
         _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
 
-        # ABI v7: enable audit logging for denied access attempts
         restrict_flags = 0
         if abi >= 7:
-            restrict_flags = (
-                LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON
-            )
+            restrict_flags |= LANDLOCK_RESTRICT_SELF_LOG_NEW_EXEC_ON
+        if abi >= 8:
+            restrict_flags |= LANDLOCK_RESTRICT_SELF_TSYNC
 
         ret = _syscall(LANDLOCK_RESTRICT_SELF, ruleset_fd, restrict_flags)
+        if ret < 0 and (restrict_flags & LANDLOCK_RESTRICT_SELF_TSYNC):
+            # TSYNC not supported — retry without it.
+            restrict_flags &= ~LANDLOCK_RESTRICT_SELF_TSYNC
+            ret = _syscall(LANDLOCK_RESTRICT_SELF, ruleset_fd, restrict_flags)
         if ret < 0:
             msg = f"landlock_restrict_self failed: errno={ctypes.get_errno()}"
             if strict:
