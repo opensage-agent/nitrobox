@@ -491,6 +491,22 @@ class SandboxBase(abc.ABC):
         class Iovec(ctypes.Structure):
             _fields_ = [("iov_base", ctypes.c_void_p), ("iov_len", ctypes.c_size_t)]
 
+        # Warn if no swap is available — MADV_COLD succeeds but has no effect.
+        try:
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    if line.startswith("SwapTotal:"):
+                        swap_kb = int(line.split()[1])
+                        if swap_kb == 0:
+                            logger.warning(
+                                "reclaim_memory: no swap available, "
+                                "hint will have no effect. Enable swap "
+                                "or zram for memory reclamation to work."
+                            )
+                        break
+        except (OSError, ValueError):
+            pass
+
         iov = Iovec(0, 0)
         ret = libc.syscall(SYS_PROCESS_MADVISE, pidfd, ctypes.byref(iov), 1, MADV_COLD, 0)
         return ret >= 0
