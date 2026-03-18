@@ -447,6 +447,54 @@ class SandboxBase(abc.ABC):
                 continue
         return result
 
+    # -- memory management ------------------------------------------------- #
+
+    def reclaim_memory(self) -> bool:
+        """Hint the kernel to reclaim this sandbox's memory.
+
+        Uses ``process_madvise(pidfd, MADV_COLD)`` to mark the sandbox
+        process's memory as cold, so the kernel can swap it out when
+        memory pressure rises.  The process keeps running — memory is
+        paged back in transparently on next access.
+
+        Useful in RL training: call on idle sandboxes while the GPU
+        is busy with a training step, then resume normally.
+
+        Returns True if the hint was accepted, False if unsupported.
+        """
+        shell = self._persistent_shell
+        pidfd = getattr(shell, "_pidfd", None)
+        if pidfd is None:
+            return False
+
+        import ctypes
+        import ctypes.util
+        import platform
+
+        SYS_PROCESS_MADVISE = {"x86_64": 440, "aarch64": 440}.get(
+            platform.machine()
+        )
+        MADV_COLD = 20
+
+        if SYS_PROCESS_MADVISE is None:
+            return False
+
+        libc_name = ctypes.util.find_library("c")
+        if not libc_name:
+            return False
+        libc = ctypes.CDLL(libc_name, use_errno=True)
+
+        # process_madvise(pidfd, iovec, iovcnt, advice, flags)
+        # We pass a zero-length iovec — the kernel applies the hint
+        # to the entire process address space when iovec is empty.
+
+        class Iovec(ctypes.Structure):
+            _fields_ = [("iov_base", ctypes.c_void_p), ("iov_len", ctypes.c_size_t)]
+
+        iov = Iovec(0, 0)
+        ret = libc.syscall(SYS_PROCESS_MADVISE, pidfd, ctypes.byref(iov), 1, MADV_COLD, 0)
+        return ret >= 0
+
     # -- abstract methods -------------------------------------------------- #
 
     @abc.abstractmethod
