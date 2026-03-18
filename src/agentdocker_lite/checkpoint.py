@@ -604,23 +604,16 @@ class _RestoredProcess:
 
     def __init__(self, pid: int, stdin_fd: int, stdout_fd: int):
         self.pid = pid
-        self._pidfd: Optional[int] = None
-        if hasattr(os, "pidfd_open"):
-            try:
-                self._pidfd = os.pidfd_open(pid)
-            except OSError:
-                pass
+        from agentdocker_lite._pidfd import pidfd_open
+        self._pidfd: Optional[int] = pidfd_open(pid)
         self.stdin = os.fdopen(stdin_fd, "wb", buffering=0) if stdin_fd >= 0 else None
         self.stdout = os.fdopen(stdout_fd, "rb", buffering=0) if stdout_fd >= 0 else None
 
     def poll(self) -> Optional[int]:
         # pidfd-based liveness check (race-free, works for non-child processes).
-        if self._pidfd is not None and hasattr(os, "pidfd_send_signal"):
-            try:
-                os.pidfd_send_signal(self._pidfd, 0)  # signal 0 = liveness check
-                return None  # alive
-            except OSError:
-                return -1  # dead
+        if self._pidfd is not None:
+            from agentdocker_lite._pidfd import pidfd_is_alive
+            return None if pidfd_is_alive(self._pidfd) else -1
         # Fallback to waitpid / /proc check.
         try:
             pid, status = os.waitpid(self.pid, os.WNOHANG)

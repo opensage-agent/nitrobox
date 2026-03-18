@@ -552,19 +552,15 @@ class SandboxBase(abc.ABC):
 
             # Check if process is alive.
             # Use pidfd to lock in process identity and avoid PID reuse races.
-            alive = False
-            pidfd = None
-            if hasattr(os, "pidfd_open"):
-                try:
-                    pidfd = os.pidfd_open(pid)
-                    # pidfd_open succeeded → PID exists. Verify it's the
-                    # same process that wrote the .pid file by checking
-                    # it's still alive (pidfd guarantees identity).
-                    alive = True
-                except OSError:
-                    # PID doesn't exist → safe to clean up.
-                    alive = False
+            from agentdocker_lite._pidfd import pidfd_open
+            pidfd = pidfd_open(pid)
+            if pidfd is not None:
+                # pidfd_open succeeded → PID exists → owner still alive.
+                alive = True
+                os.close(pidfd)
             else:
+                # pidfd_open failed → PID dead or unsupported.
+                # Fallback to kill(0) for kernels without pidfd.
                 try:
                     os.kill(pid, 0)
                     alive = True
@@ -575,11 +571,7 @@ class SandboxBase(abc.ABC):
 
             if alive:
                 logger.debug("Sandbox %s owner pid %d still alive, skipping", entry.name, pid)
-                if pidfd is not None:
-                    os.close(pidfd)
                 continue
-            if pidfd is not None:
-                os.close(pidfd)
 
             # Process is dead — clean up
             logger.info("Cleaning up stale sandbox %s (pid %d dead)", entry.name, pid)

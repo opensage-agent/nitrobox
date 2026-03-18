@@ -178,29 +178,28 @@ class RootfulSandbox(SandboxBase):
         pid_file = self._env_dir / ".pid"
         pid_file.write_text(str(os.getpid()))
 
-        features = []
-        if self._persistent_shell._pidfd is not None:
-            features.append("pidfd")
-        if self._cgroup_path:
-            features.append("cgroup-v2")
-        if config.seccomp:
-            features.append("seccomp")
-        if config.net_isolate:
-            features.append("netns")
-        if config.cpuset_cpus:
-            features.append(f"cpuset={config.cpuset_cpus}")
-        if config.oom_score_adj is not None:
-            features.append(f"oom={config.oom_score_adj}")
-        features.append("mask-paths")
-        features.append("cap-drop")
-
+        self.features: dict[str, object] = {
+            "pidfd": self._persistent_shell._pidfd is not None,
+            "cgroup_v2": self._cgroup_path is not None,
+            "seccomp": config.seccomp,
+            "netns": config.net_isolate,
+            "cpuset_cpus": config.cpuset_cpus,
+            "oom_score_adj": config.oom_score_adj,
+            "mask_paths": True,
+            "cap_drop": True,
+        }
+        feat_str = ", ".join(
+            k if v is True else f"{k}={v}"
+            for k, v in self.features.items()
+            if v
+        )
         logger.info(
             "Sandbox ready: name=%s rootfs=%s fs=%s features=[%s] "
             "[setup: fs=%.1fms cgroup=%.1fms volumes=%.1fms shell=%.1fms]",
             name,
             self._rootfs,
             self._fs_backend,
-            ", ".join(features),
+            feat_str,
             fs_ms,
             cg_ms,
             vol_ms,
@@ -343,19 +342,22 @@ class RootfulSandbox(SandboxBase):
         pid_file = self._env_dir / ".pid"
         pid_file.write_text(str(os.getpid()))
 
-        features = ["userns"]
-        if self._persistent_shell._pidfd is not None:
-            features.append("pidfd")
-        if config.seccomp:
-            features.append("seccomp")
-        if config.net_isolate:
-            features.append("netns")
-        features.append("mask-paths")
-        features.append("cap-drop")
-
+        self.features: dict[str, object] = {
+            "userns": True,
+            "pidfd": self._persistent_shell._pidfd is not None,
+            "seccomp": config.seccomp,
+            "netns": config.net_isolate,
+            "mask_paths": True,
+            "cap_drop": True,
+        }
+        feat_str = ", ".join(
+            k if v is True else f"{k}={v}"
+            for k, v in self.features.items()
+            if v
+        )
         logger.info(
             "Sandbox ready (userns): name=%s rootfs=%s features=[%s] [shell=%.1fms]",
-            name, self._rootfs, ", ".join(features), shell_ms,
+            name, self._rootfs, feat_str, shell_ms,
         )
 
     def _generate_userns_setup_script(self) -> Path:

@@ -287,11 +287,8 @@ class _PersistentShell:
             )
 
         # Create pidfd for race-free process management.
-        if hasattr(os, "pidfd_open"):
-            try:
-                self._pidfd = os.pidfd_open(self._process.pid)
-            except OSError:
-                self._pidfd = None
+        from agentdocker_lite._pidfd import pidfd_open
+        self._pidfd = pidfd_open(self._process.pid)
 
         # Clean up old root mounts left by pivot_root (rootful mode only).
         if not self._userns:

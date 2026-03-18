@@ -252,6 +252,17 @@ from agentdocker_lite import SandboxBase
 SandboxBase.cleanup_stale()
 ```
 
+## Feature detection
+
+Active kernel features are auto-detected at creation and accessible via `sb.features`:
+
+```python
+sb = Sandbox(config, name="worker-0")
+print(sb.features)
+# {'pidfd': True, 'cgroup_v2': True, 'seccomp': True, 'netns': False,
+#  'cpuset_cpus': None, 'oom_score_adj': None, 'mask_paths': True, 'cap_drop': True}
+```
+
 ## Performance
 
 | | Docker | agentdocker-lite | Speedup |
