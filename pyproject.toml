@@ -20,3 +20,4 @@ packages = ["src/agentdocker_lite"]
 "src/agentdocker_lite/_vendor/pasta" = "agentdocker_lite/_vendor/pasta"
 "src/agentdocker_lite/_vendor/pasta.avx2" = "agentdocker_lite/_vendor/pasta.avx2"
 "src/agentdocker_lite/_vendor/criu" = "agentdocker_lite/_vendor/criu"
+"src/agentdocker_lite/_vendor/adl-seccomp" = "agentdocker_lite/_vendor/adl-seccomp"

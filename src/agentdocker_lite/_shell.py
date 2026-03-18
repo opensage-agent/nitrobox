@@ -130,20 +130,44 @@ class _PersistentShell:
             shell_exec = self._shell
             if "bash" in self._shell:
                 shell_exec += " --norc --noprofile"
-            # pivot_root makes root == mntns root (CRIU-compatible).
-            # We cannot unmount old root from the script because the
-            # rootfs may lack mount/umount and host tools fail due to
-            # glibc version mismatch.  The old root is cleaned up via
-            # _cleanup_pivot_old() using ctypes syscalls after start.
+
+            # Write seccomp BPF + static helper into rootfs BEFORE pivot_root.
+            if self._seccomp:
+                self._prepare_seccomp_helper()
+
+            # Mount /proc and /dev BEFORE pivot_root (host tools available).
+            # After pivot_root, host tools have glibc mismatch.
+            # Mask/readonly/seccomp are done by adl-seccomp (after pivot_root).
+            rootfs_q = shlex.quote(str(self._rootfs))
+            pre_pivot = (
+                f"mount -t proc proc {rootfs_q}/proc 2>/dev/null; "
+                f"mount -t tmpfs -o nosuid,mode=0755 tmpfs {rootfs_q}/dev 2>&1; "
+                f"mknod -m 666 {rootfs_q}/dev/null c 1 3 2>/dev/null; "
+                f"mknod -m 666 {rootfs_q}/dev/zero c 1 5 2>/dev/null; "
+                f"mknod -m 666 {rootfs_q}/dev/full c 1 7 2>/dev/null; "
+                f"mknod -m 444 {rootfs_q}/dev/random c 1 8 2>/dev/null; "
+                f"mknod -m 444 {rootfs_q}/dev/urandom c 1 9 2>/dev/null; "
+                f"mknod -m 666 {rootfs_q}/dev/tty c 5 0 2>/dev/null; "
+                f"ln -sf /proc/self/fd {rootfs_q}/dev/fd 2>/dev/null; "
+                f"ln -sf /proc/self/fd/0 {rootfs_q}/dev/stdin 2>/dev/null; "
+                f"ln -sf /proc/self/fd/1 {rootfs_q}/dev/stdout 2>/dev/null; "
+                f"ln -sf /proc/self/fd/2 {rootfs_q}/dev/stderr 2>/dev/null; "
+                f"mkdir -p {rootfs_q}/dev/pts {rootfs_q}/dev/shm 2>/dev/null; "
+            )
+            if self._hostname:
+                pre_pivot += f"hostname {shlex.quote(self._hostname)} 2>/dev/null; "
+
+            # adl-seccomp does: cap drop → mask paths → readonly → seccomp → exec shell
+            seccomp_wrap = "/tmp/.adl_seccomp " if self._seccomp else ""
+
             pivot_script = (
                 "mount --make-rprivate / && "
-                f"cd {shlex.quote(str(self._rootfs))} && "
+                + pre_pivot
+                + f"cd {rootfs_q} && "
                 "mkdir -p .pivot_old && "
                 "pivot_root . .pivot_old && "
                 "cd / && "
-                # setsid makes the shell a session leader within its
-                # PID namespace (required for CRIU checkpoint).
-                f"exec setsid {shell_exec}"
+                f"exec setsid {seccomp_wrap}{shell_exec}"
             )
             cmd.extend(["--fork", "bash", "-c", pivot_script])
 
@@ -253,30 +277,11 @@ class _PersistentShell:
                 f"echo 0 >&{self._signal_fd}\n"
             )
         else:
+            # Rootful: /proc, /dev mounted in pivot_script (before pivot_root).
+            # Mask/readonly/seccomp/cap-drop done by adl-seccomp (after pivot_root).
+            # Init script only does cd + signal.
             init_script = (
                 "PS1='' PS2=''\n"
-                # Mount /proc (needed for $ORIGIN RPATH, /proc/self/fd, ps, etc.)
-                "mount -t proc proc /proc 2>/dev/null\n"
-                # Populate /dev with essential device nodes and symlinks.
-                # Docker export leaves /dev nearly empty (regular files, not devices).
-                # NOTE: /dev/null must be created FIRST — later 2>/dev/null redirects
-                # would otherwise create it as a regular file on the fresh tmpfs.
-                "mount -t tmpfs -o nosuid,mode=0755 tmpfs /dev 2>/proc/self/fd/1\n"
-                "mknod -m 666 /dev/null c 1 3\n"
-                "mknod -m 666 /dev/zero c 1 5 2>/dev/null\n"
-                "mknod -m 666 /dev/full c 1 7 2>/dev/null\n"
-                "mknod -m 444 /dev/random c 1 8 2>/dev/null\n"
-                "mknod -m 444 /dev/urandom c 1 9 2>/dev/null\n"
-                "mknod -m 666 /dev/tty c 5 0 2>/dev/null\n"
-                "ln -sf /proc/self/fd /dev/fd 2>/dev/null\n"
-                "ln -sf /proc/self/fd/0 /dev/stdin 2>/dev/null\n"
-                "ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null\n"
-                "ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null\n"
-                "mkdir -p /dev/pts /dev/shm 2>/dev/null\n"
-                + _mask_snippet
-                + _ro_snippet
-                + _hostname_snippet
-                + _seccomp_snippet
                 + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"echo 0 >&{self._signal_fd}\n"
             )
@@ -308,6 +313,34 @@ class _PersistentShell:
             ns_flags,
             self._tty,
         )
+
+    def _prepare_seccomp_helper(self) -> None:
+        """Write seccomp BPF + static helper into rootfs /tmp.
+
+        Called BEFORE pivot_root. The pivot_script then:
+            exec setsid /tmp/.adl_seccomp /bin/sh
+        The helper applies cap drop + mask + readonly + seccomp,
+        then exec's the shell. No Python needed in rootfs.
+        """
+        from pathlib import Path
+        from agentdocker_lite.security import build_seccomp_bpf
+
+        bpf_bytes = build_seccomp_bpf()
+        if bpf_bytes is None:
+            return
+
+        vendor_dir = Path(__file__).parent / "_vendor"
+        helper_src = vendor_dir / "adl-seccomp"
+        if not helper_src.exists():
+            return
+
+        tmp_dir = self._rootfs / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
+        import shutil
+        (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
+        shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
+        (tmp_dir / ".adl_seccomp").chmod(0o755)
 
     def _cleanup_pivot_old(self) -> None:
         """Unmount /.pivot_old inside the shell's mount namespace.

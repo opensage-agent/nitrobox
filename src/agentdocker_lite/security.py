@@ -214,6 +214,46 @@ def _bpf_jump(code: int, k: int, jt: int, jf: int) -> _SockFilterInsn:
     return _SockFilterInsn(code=code, jt=jt, jf=jf, k=k)
 
 
+def build_seccomp_bpf() -> bytes | None:
+    """Build seccomp BPF bytecode and return as raw bytes.
+
+    Returns None if the architecture is unsupported.
+    Used by the adl-seccomp static helper binary (rootful mode).
+    """
+    machine = os.uname().machine
+    if machine == "x86_64":
+        arch, blocked = AUDIT_ARCH_X86_64, _BLOCKED_X86_64
+        clone_nr, ioctl_nr = _CLONE_X86_64, _IOCTL_X86_64
+    elif machine in ("aarch64", "arm64"):
+        arch, blocked = AUDIT_ARCH_AARCH64, _BLOCKED_AARCH64
+        clone_nr, ioctl_nr = _CLONE_AARCH64, _IOCTL_AARCH64
+    else:
+        return None
+
+    syscall_nrs = sorted(blocked.values())
+    insns: list[_SockFilterInsn] = []
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 4))
+    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, arch, 1, 0))
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS))
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))
+    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, clone_nr, 0, 4))
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16))
+    insns.append(_bpf_jump(BPF_JMP | BPF_JSET | BPF_K, _CLONE_NS_FLAGS, 0, 1))
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))
+    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, ioctl_nr, 0, 4))
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16))
+    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, _TIOCSTI, 0, 1))
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))
+    for i, nr in enumerate(syscall_nrs):
+        insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, nr, len(syscall_nrs) - i, 0))
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW))
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
+    arr = (_SockFilterInsn * len(insns))(*insns)
+    return bytes(arr)
+
+
 def apply_seccomp_filter() -> bool:
     """Apply a seccomp-bpf filter that blocks dangerous syscalls.
 

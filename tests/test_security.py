@@ -86,27 +86,11 @@ class TestSeccomp:
         assert ec == 0
         assert "from_child" in output
 
-    def test_seccomp_blocks_in_rootfs_with_python(self, tmp_path):
-        """seccomp blocks mount/unshare when rootfs has python3 (e.g. Kali)."""
-        _requires_root()
-        _requires_docker()
-        config = SandboxConfig(
-            image=TEST_IMAGE,
-            working_dir="/workspace",
-            env_base_dir=str(tmp_path / "envs"),
-            rootfs_cache_dir=str(tmp_path / "cache"),
-            seccomp=True,
-        )
-        sb = Sandbox(config, name="seccomp-py-test")
-        try:
-            # Check if python3 available — seccomp only works if it is
-            _, ec = sb.run("which python3")
-            if ec != 0:
-                pytest.skip("rootfs has no python3 — seccomp helper can't run")
-            output, ec = sb.run("mount -t tmpfs none /mnt 2>&1 || echo BLOCKED")
-            assert "BLOCKED" in output or "Operation not permitted" in output or ec != 0
-        finally:
-            sb.delete()
+    def test_seccomp_filter_active(self, root_sandbox):
+        """Seccomp filter is active (applied via static binary, no Python needed)."""
+        output, ec = root_sandbox.run("cat /proc/self/status | grep Seccomp")
+        assert ec == 0
+        assert "2" in output  # Seccomp: 2 = filter mode
 
 
 # ------------------------------------------------------------------ #
