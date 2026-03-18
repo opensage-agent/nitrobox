@@ -45,7 +45,7 @@ sb.reset()   # instant filesystem reset (~12ms)
 sb.delete()  # full cleanup
 ```
 
-No `sudo` required. The sandbox automatically uses user namespaces for full isolation (overlayfs, PID/UTS/IPC/time namespace, pivot_root) without root.
+No `sudo` required. The sandbox automatically uses user namespaces for full isolation (overlayfs, PID/UTS/IPC namespace, chroot) without root.
 
 ## Volumes
 

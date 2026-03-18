@@ -313,10 +313,13 @@ class TestPTY:
         assert ec != 0
 
     def test_isatty(self, tty_sandbox):
-        """Programs should see a TTY."""
-        # Use `test -t 1` (POSIX shell builtin) — no Python needed.
-        _, ec = tty_sandbox.run("test -t 1")
+        """Programs should see a TTY (requires python3 in rootfs)."""
+        _, check_ec = tty_sandbox.run("which python3")
+        if check_ec != 0:
+            pytest.skip("rootfs has no python3")
+        output, ec = tty_sandbox.run("python3 -c 'import sys; print(sys.stdout.isatty())'")
         assert ec == 0
+        assert "True" in output
 
     def test_sequential(self, tty_sandbox):
         for i in range(5):

@@ -16,8 +16,15 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Docker-default masked/readonly paths are hardcoded in the adl-seccomp
-# static binary (_vendor/adl-seccomp.c) which applies them before exec.
+# Docker-default security paths (applied inside the namespace).
+_DEFAULT_MASKED_PATHS = [
+    "/proc/kcore", "/proc/keys", "/proc/timer_list",
+    "/proc/sched_debug", "/sys/firmware", "/proc/scsi",
+]
+_DEFAULT_READONLY_PATHS = [
+    "/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys",
+    "/proc/sysrq-trigger",
+]
 
 
 class _PersistentShell:
@@ -123,46 +130,20 @@ class _PersistentShell:
             shell_exec = self._shell
             if "bash" in self._shell:
                 shell_exec += " --norc --noprofile"
-
-            # Write seccomp BPF + static helper into rootfs /tmp BEFORE
-            # pivot_root (so they're visible inside the new root).
-            if self._seccomp:
-                self._prepare_seccomp_helper()
-
-            # Mount /proc and /dev BEFORE pivot_root (host tools available).
-            # Mask/readonly paths are done by adl-seccomp (after pivot_root,
-            # before seccomp blocks mount).
-            rootfs = shlex.quote(str(self._rootfs))
-            pre_pivot_mounts = (
-                f"mount -t proc proc {rootfs}/proc 2>/dev/null; "
-                f"mount -t tmpfs -o nosuid,mode=0755 tmpfs {rootfs}/dev 2>&1; "
-                f"mknod -m 666 {rootfs}/dev/null c 1 3 2>/dev/null; "
-                f"mknod -m 666 {rootfs}/dev/zero c 1 5 2>/dev/null; "
-                f"mknod -m 666 {rootfs}/dev/full c 1 7 2>/dev/null; "
-                f"mknod -m 444 {rootfs}/dev/random c 1 8 2>/dev/null; "
-                f"mknod -m 444 {rootfs}/dev/urandom c 1 9 2>/dev/null; "
-                f"mknod -m 666 {rootfs}/dev/tty c 5 0 2>/dev/null; "
-                f"ln -sf /proc/self/fd {rootfs}/dev/fd 2>/dev/null; "
-                f"ln -sf /proc/self/fd/0 {rootfs}/dev/stdin 2>/dev/null; "
-                f"ln -sf /proc/self/fd/1 {rootfs}/dev/stdout 2>/dev/null; "
-                f"ln -sf /proc/self/fd/2 {rootfs}/dev/stderr 2>/dev/null; "
-                f"mkdir -p {rootfs}/dev/pts {rootfs}/dev/shm 2>/dev/null; "
-            )
-            if self._hostname:
-                pre_pivot_mounts += (
-                    f"hostname {shlex.quote(self._hostname)} 2>/dev/null; "
-                )
-
+            # pivot_root makes root == mntns root (CRIU-compatible).
+            # We cannot unmount old root from the script because the
+            # rootfs may lack mount/umount and host tools fail due to
+            # glibc version mismatch.  The old root is cleaned up via
+            # _cleanup_pivot_old() using ctypes syscalls after start.
             pivot_script = (
                 "mount --make-rprivate / && "
-                + pre_pivot_mounts
-                + f"cd {rootfs} && "
+                f"cd {shlex.quote(str(self._rootfs))} && "
                 "mkdir -p .pivot_old && "
                 "pivot_root . .pivot_old && "
                 "cd / && "
-                + "exec setsid "
-                + ("/tmp/.adl_seccomp " if self._seccomp else "")
-                + shell_exec
+                # setsid makes the shell a session leader within its
+                # PID namespace (required for CRIU checkpoint).
+                f"exec setsid {shell_exec}"
             )
             cmd.extend(["--fork", "bash", "-c", pivot_script])
 
@@ -229,28 +210,73 @@ class _PersistentShell:
         self._signal_w = None
 
         # Initialize shell: disable prompts, cd to working dir, signal ready.
-        # Security (mask/readonly/seccomp/cap-drop) is handled by adl-seccomp
-        # which runs before bash starts. Init script only does hostname + cd.
+        # In userns mode, /proc and /dev are already set up by the setup script
+        # before chroot.  In rootful mode, they're set up here (inside chroot).
+        # Security hardening: mask sensitive paths and make others read-only.
+        # Uses Docker-default lists. Applied after /proc and /dev are mounted.
+        _mask_snippet = ""
+        for p in _DEFAULT_MASKED_PATHS:
+            _mask_snippet += (
+                f"if [ -d {p} ]; then mount -t tmpfs tmpfs {p} 2>/dev/null; "
+                f"elif [ -e {p} ]; then mount --bind /dev/null {p} 2>/dev/null; fi\n"
+            )
+        _ro_snippet = ""
+        for p in _DEFAULT_READONLY_PATHS:
+            _ro_snippet += (
+                f"mount --bind {p} {p} 2>/dev/null && "
+                f"mount -o remount,ro,bind {p} 2>/dev/null\n"
+            )
+
+        _seccomp_snippet = (
+            "for py in python3 python3.13 python3.12 python3.11 python3.10 python; do\n"
+            "  if command -v $py >/dev/null 2>&1; then\n"
+            "    $py /tmp/.adl_seccomp.py 2>/dev/null && break\n"
+            "  fi\n"
+            "done\n"
+            if self._seccomp else ""
+        )
         _hostname_snippet = (
             f"hostname {shlex.quote(self._hostname)} 2>/dev/null\n"
             if self._hostname else ""
         )
 
         if self._userns:
-            # User namespace: setup script handles mount/dev/chroot.
-            # adl-seccomp handles mask/readonly/cap-drop/seccomp.
-            # Init script only does hostname and cd.
+            # User namespace: setup script already did mount/dev/chroot.
+            # This runs inside the chroot bash (read from stdin pipe).
             init_script = (
                 "PS1='' PS2=''\n"
+                + _mask_snippet
+                + _ro_snippet
                 + _hostname_snippet
+                + _seccomp_snippet
                 + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"echo 0 >&{self._signal_fd}\n"
             )
         else:
-            # Rootful mode: /proc, /dev, mask/readonly, hostname are all
-            # set up in pivot_script (before seccomp blocks mount/sethostname).
             init_script = (
                 "PS1='' PS2=''\n"
+                # Mount /proc (needed for $ORIGIN RPATH, /proc/self/fd, ps, etc.)
+                "mount -t proc proc /proc 2>/dev/null\n"
+                # Populate /dev with essential device nodes and symlinks.
+                # Docker export leaves /dev nearly empty (regular files, not devices).
+                # NOTE: /dev/null must be created FIRST — later 2>/dev/null redirects
+                # would otherwise create it as a regular file on the fresh tmpfs.
+                "mount -t tmpfs -o nosuid,mode=0755 tmpfs /dev 2>/proc/self/fd/1\n"
+                "mknod -m 666 /dev/null c 1 3\n"
+                "mknod -m 666 /dev/zero c 1 5 2>/dev/null\n"
+                "mknod -m 666 /dev/full c 1 7 2>/dev/null\n"
+                "mknod -m 444 /dev/random c 1 8 2>/dev/null\n"
+                "mknod -m 444 /dev/urandom c 1 9 2>/dev/null\n"
+                "mknod -m 666 /dev/tty c 5 0 2>/dev/null\n"
+                "ln -sf /proc/self/fd /dev/fd 2>/dev/null\n"
+                "ln -sf /proc/self/fd/0 /dev/stdin 2>/dev/null\n"
+                "ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null\n"
+                "ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null\n"
+                "mkdir -p /dev/pts /dev/shm 2>/dev/null\n"
+                + _mask_snippet
+                + _ro_snippet
+                + _hostname_snippet
+                + _seccomp_snippet
                 + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"echo 0 >&{self._signal_fd}\n"
             )
@@ -272,9 +298,6 @@ class _PersistentShell:
         if not self._userns:
             self._cleanup_pivot_old()
 
-        # Security was applied during startup via the adl-seccomp wrapper
-        # binary in the pivot_script (before bash starts).
-
         ns_flags = "user,pid,mount" if self._userns else "pid,mount"
         if self._net_isolate:
             ns_flags += ",net"
@@ -285,36 +308,6 @@ class _PersistentShell:
             ns_flags,
             self._tty,
         )
-
-    def _prepare_seccomp_helper(self) -> None:
-        """Write seccomp BPF bytecode + static helper into rootfs /tmp.
-
-        Called BEFORE pivot_root / shell startup. The pivot_script then:
-            exec setsid /tmp/.adl_seccomp /bin/sh
-        The helper applies cap drop + seccomp, then exec's the shell.
-        Seccomp filter is inherited across exec — no Python needed in rootfs.
-        """
-        from pathlib import Path
-        from agentdocker_lite.security import build_seccomp_bpf
-
-        bpf_bytes = build_seccomp_bpf()
-        if bpf_bytes is None:
-            logger.warning("seccomp: unsupported arch, skipping")
-            return
-
-        vendor_dir = Path(__file__).parent / "_vendor"
-        helper_src = vendor_dir / "adl-seccomp"
-        if not helper_src.exists():
-            logger.warning("adl-seccomp binary not found")
-            return
-
-        tmp_dir = self._rootfs / "tmp"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-
-        import shutil
-        (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
-        shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
-        (tmp_dir / ".adl_seccomp").chmod(0o755)
 
     def _cleanup_pivot_old(self) -> None:
         """Unmount /.pivot_old inside the shell's mount namespace.

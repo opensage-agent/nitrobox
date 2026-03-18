@@ -214,58 +214,6 @@ def _bpf_jump(code: int, k: int, jt: int, jf: int) -> _SockFilterInsn:
     return _SockFilterInsn(code=code, jt=jt, jf=jf, k=k)
 
 
-def build_seccomp_bpf() -> bytes | None:
-    """Build the seccomp BPF bytecode and return as raw bytes.
-
-    Returns None if the architecture is unsupported.
-    The bytes can be written to a file and loaded by the adl-seccomp
-    static helper binary.
-    """
-    machine = os.uname().machine
-    if machine == "x86_64":
-        arch = AUDIT_ARCH_X86_64
-        blocked = _BLOCKED_X86_64
-        clone_nr = _CLONE_X86_64
-        ioctl_nr = _IOCTL_X86_64
-    elif machine in ("aarch64", "arm64"):
-        arch = AUDIT_ARCH_AARCH64
-        blocked = _BLOCKED_AARCH64
-        clone_nr = _CLONE_AARCH64
-        ioctl_nr = _IOCTL_AARCH64
-    else:
-        return None
-
-    syscall_nrs = sorted(blocked.values())
-    insns: list[_SockFilterInsn] = []
-
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 4))
-    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, arch, 1, 0))
-    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS))
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))
-
-    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, clone_nr, 0, 4))
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16))
-    insns.append(_bpf_jump(BPF_JMP | BPF_JSET | BPF_K, _CLONE_NS_FLAGS, 0, 1))
-    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))
-
-    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, ioctl_nr, 0, 4))
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16))
-    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, _TIOCSTI, 0, 1))
-    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
-    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))
-
-    for i, nr in enumerate(syscall_nrs):
-        jump_to_eperm = len(syscall_nrs) - i
-        insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, nr, jump_to_eperm, 0))
-
-    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW))
-    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
-
-    arr = (_SockFilterInsn * len(insns))(*insns)
-    return bytes(arr)
-
-
 def apply_seccomp_filter() -> bool:
     """Apply a seccomp-bpf filter that blocks dangerous syscalls.
 
@@ -279,14 +227,65 @@ def apply_seccomp_filter() -> bool:
         logger.warning("seccomp: libc not found, skipping")
         return False
 
-    bpf_bytes = build_seccomp_bpf()
-    if bpf_bytes is None:
-        logger.warning("seccomp: unsupported arch, skipping")
+    machine = os.uname().machine
+    if machine == "x86_64":
+        arch = AUDIT_ARCH_X86_64
+        blocked = _BLOCKED_X86_64
+        clone_nr = _CLONE_X86_64
+        ioctl_nr = _IOCTL_X86_64
+    elif machine in ("aarch64", "arm64"):
+        arch = AUDIT_ARCH_AARCH64
+        blocked = _BLOCKED_AARCH64
+        clone_nr = _CLONE_AARCH64
+        ioctl_nr = _IOCTL_AARCH64
+    else:
+        logger.warning("seccomp: unsupported arch %s, skipping", machine)
         return False
 
-    n = len(bpf_bytes) // ctypes.sizeof(_SockFilterInsn)
-    arr = (_SockFilterInsn * n).from_buffer_copy(bpf_bytes)
-    prog = _SockFprog(len=n, filter=arr)
+    syscall_nrs = sorted(blocked.values())
+    insns: list[_SockFilterInsn] = []
+
+    # --- 1. Arch check: KILL on wrong arch (prevents x32 ABI bypass) ---
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 4))  # load arch
+    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, arch, 1, 0))
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS))
+
+    # --- 2. Load syscall number ---
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))
+
+    # --- 3. clone() arg-level filter: allow fork/threads, block NS flags ---
+    # if syscall == clone: load arg0 (flags), check NS bits
+    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, clone_nr, 0, 4))
+    # Load clone flags (arg0 = seccomp_data.args[0], offset 16)
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16))
+    # JSET: if any NS flag is set → EPERM
+    insns.append(_bpf_jump(BPF_JMP | BPF_JSET | BPF_K, _CLONE_NS_FLAGS, 0, 1))
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
+    # NS flags not set → allow (reload syscall nr for subsequent checks)
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))
+
+    # --- 4. ioctl(TIOCSTI) filter: block terminal injection ---
+    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, ioctl_nr, 0, 4))
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 16))  # arg0 = ioctl cmd
+    insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, _TIOCSTI, 0, 1))
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
+    insns.append(_bpf_stmt(BPF_LD | BPF_W | BPF_ABS, 0))  # reload syscall nr
+
+    # --- 5. Simple blocklist ---
+    # Each check: if match → jump to EPERM (at end), else fall through to next check
+    # EPERM is at: remaining_checks + 1 (skip remaining checks + ALLOW)
+    for i, nr in enumerate(syscall_nrs):
+        jump_to_eperm = len(syscall_nrs) - i  # skip remaining checks + ALLOW stmt
+        insns.append(_bpf_jump(BPF_JMP | BPF_JEQ | BPF_K, nr, jump_to_eperm, 0))
+
+    # --- 6. Default: allow ---
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW))
+    # --- 7. Block: EPERM ---
+    insns.append(_bpf_stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | 1))
+
+    # Install filter
+    arr = (_SockFilterInsn * len(insns))(*insns)
+    prog = _SockFprog(len=len(insns), filter=arr)
 
     ret = _libc.prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
     if ret != 0:
@@ -298,7 +297,7 @@ def apply_seccomp_filter() -> bool:
         logger.warning("seccomp: prctl(SET_SECCOMP) failed: errno=%d", ctypes.get_errno())
         return False
 
-    logger.debug("seccomp: applied BPF filter (%d instructions)", n)
+    logger.debug("seccomp: blocked %d syscalls + clone NS flags + ioctl TIOCSTI", len(blocked))
     return True
 
 

@@ -607,6 +607,9 @@ class SandboxBase(abc.ABC):
                 capture_output=True,
             )
 
+        if self._config.seccomp and self._userns:
+            self._write_seccomp_helper_userns()
+
         self._persistent_shell.start()
         logger.debug("Snapshot restored: %s -> %s", path, upper)
 
