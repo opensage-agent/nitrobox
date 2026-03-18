@@ -16,6 +16,16 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Docker-default security paths (applied inside the namespace).
+_DEFAULT_MASKED_PATHS = [
+    "/proc/kcore", "/proc/keys", "/proc/timer_list",
+    "/proc/sched_debug", "/sys/firmware", "/proc/scsi",
+]
+_DEFAULT_READONLY_PATHS = [
+    "/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys",
+    "/proc/sysrq-trigger",
+]
+
 
 class _PersistentShell:
     """Persistent shell process inside a Linux namespace with chroot.
@@ -197,6 +207,21 @@ class _PersistentShell:
         # Initialize shell: disable prompts, cd to working dir, signal ready.
         # In userns mode, /proc and /dev are already set up by the setup script
         # before chroot.  In rootful mode, they're set up here (inside chroot).
+        # Security hardening: mask sensitive paths and make others read-only.
+        # Uses Docker-default lists. Applied after /proc and /dev are mounted.
+        _mask_snippet = ""
+        for p in _DEFAULT_MASKED_PATHS:
+            _mask_snippet += (
+                f"if [ -d {p} ]; then mount -t tmpfs tmpfs {p} 2>/dev/null; "
+                f"elif [ -e {p} ]; then mount --bind /dev/null {p} 2>/dev/null; fi\n"
+            )
+        _ro_snippet = ""
+        for p in _DEFAULT_READONLY_PATHS:
+            _ro_snippet += (
+                f"mount --bind {p} {p} 2>/dev/null && "
+                f"mount -o remount,ro,bind {p} 2>/dev/null\n"
+            )
+
         _seccomp_snippet = (
             "for py in python3 python3.13 python3.12 python3.11 python3.10 python; do\n"
             "  if command -v $py >/dev/null 2>&1; then\n"
@@ -215,6 +240,8 @@ class _PersistentShell:
             # This runs inside the chroot bash (read from stdin pipe).
             init_script = (
                 "PS1='' PS2=''\n"
+                + _mask_snippet
+                + _ro_snippet
                 + _hostname_snippet
                 + _seccomp_snippet
                 + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
@@ -241,6 +268,8 @@ class _PersistentShell:
                 "ln -sf /proc/self/fd/1 /dev/stdout 2>/dev/null\n"
                 "ln -sf /proc/self/fd/2 /dev/stderr 2>/dev/null\n"
                 "mkdir -p /dev/pts /dev/shm 2>/dev/null\n"
+                + _mask_snippet
+                + _ro_snippet
                 + _hostname_snippet
                 + _seccomp_snippet
                 + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"

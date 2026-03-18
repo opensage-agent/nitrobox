@@ -103,6 +103,7 @@ class RootfulSandbox(SandboxBase):
             "memory_max": config.memory_max,
             "pids_max": config.pids_max,
             "io_max": config.io_max,
+            "cpuset_cpus": config.cpuset_cpus,
         }
 
         # --- setup --------------------------------------------------------
@@ -170,6 +171,9 @@ class RootfulSandbox(SandboxBase):
         self._pasta_process = None
         self._start_pasta()
 
+        if config.oom_score_adj is not None:
+            self._apply_oom_score_adj(config.oom_score_adj)
+
         # Write PID file for stale sandbox cleanup
         pid_file = self._env_dir / ".pid"
         pid_file.write_text(str(os.getpid()))
@@ -232,6 +236,7 @@ class RootfulSandbox(SandboxBase):
             "memory_max": config.memory_max,
             "pids_max": config.pids_max,
             "io_max": config.io_max,
+            "cpuset_cpus": config.cpuset_cpus,
         }
 
         # --- cgroup via systemd delegation --------------------------------
@@ -313,6 +318,9 @@ class RootfulSandbox(SandboxBase):
         self._bg_handles: dict[str, str] = {}
         self._pasta_process = None
         self._start_pasta()
+
+        if config.oom_score_adj is not None:
+            self._apply_oom_score_adj(config.oom_score_adj)
 
         # Write PID file for stale sandbox cleanup
         pid_file = self._env_dir / ".pid"
@@ -431,9 +439,10 @@ class RootfulSandbox(SandboxBase):
         src = inspect.getsource(security)
         helper = (
             "#!/usr/bin/env python3\n"
-            "# Auto-generated seccomp helper\n"
+            "# Auto-generated security helper\n"
             + src
-            + "\napply_seccomp_filter()\n"
+            + "\ndrop_capabilities()\n"
+            + "apply_seccomp_filter()\n"
         )
         target = self._upper_dir / "tmp" / ".adl_seccomp.py"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -666,9 +675,10 @@ class RootfulSandbox(SandboxBase):
         src = inspect.getsource(security)
         helper = (
             "#!/usr/bin/env python3\n"
-            "# Auto-generated seccomp helper — applied inside sandbox chroot\n"
+            "# Auto-generated security helper — applied inside sandbox chroot\n"
             + src
-            + "\napply_seccomp_filter()\n"
+            + "\ndrop_capabilities()\n"
+            + "apply_seccomp_filter()\n"
         )
         target = self._rootfs / "tmp" / ".adl_seccomp.py"
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -926,6 +936,7 @@ class RootfulSandbox(SandboxBase):
                     ("memory_max", "memory"),
                     ("pids_max", "pids"),
                     ("io_max", "io"),
+                    ("cpuset_cpus", "cpuset"),
                 ]:
                     if self._cgroup_limits.get(key):
                         try:
@@ -942,6 +953,7 @@ class RootfulSandbox(SandboxBase):
             "memory_max": "memory.max",
             "pids_max": "pids.max",
             "io_max": "io.max",
+            "cpuset_cpus": "cpuset.cpus",
         }
         for key, filename in limit_files.items():
             value = self._cgroup_limits.get(key)
@@ -1024,6 +1036,17 @@ class RootfulSandbox(SandboxBase):
                 f"btrfs snapshot failed on reset: {result.stderr.strip()}"
             )
         self._btrfs_active = True
+
+    # ------------------------------------------------------------------ #
+    #  OOM score                                                            #
+    # ------------------------------------------------------------------ #
+
+    def _apply_oom_score_adj(self, score: int) -> None:
+        pid = self._persistent_shell._process.pid
+        try:
+            Path(f"/proc/{pid}/oom_score_adj").write_text(str(score))
+        except OSError as e:
+            logger.warning("Failed to set oom_score_adj=%d: %s", score, e)
 
     # ------------------------------------------------------------------ #
     #  Pasta networking                                                    #

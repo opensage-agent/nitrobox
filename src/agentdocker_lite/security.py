@@ -26,6 +26,45 @@ _libc = ctypes.CDLL(_libc_name, use_errno=True) if _libc_name else None
 PR_SET_NO_NEW_PRIVS = 38
 PR_SET_SECCOMP = 22
 SECCOMP_MODE_FILTER = 2
+PR_CAPBSET_DROP = 24
+
+# Docker default: capabilities to KEEP (everything else is dropped).
+_DOCKER_DEFAULT_CAPS = {
+    0,   # CHOWN
+    1,   # DAC_OVERRIDE
+    3,   # FOWNER
+    4,   # FSETID
+    5,   # KILL
+    6,   # SETGID
+    7,   # SETUID
+    8,   # SETPCAP
+    10,  # NET_BIND_SERVICE
+    18,  # SYS_CHROOT
+    27,  # MKNOD
+    29,  # AUDIT_WRITE
+    31,  # SETFCAP
+}
+# Total number of capabilities in current kernels.
+_CAP_LAST_CAP = 41
+
+
+def drop_capabilities() -> bool:
+    """Drop all capabilities except Docker defaults from the bounding set.
+
+    Uses prctl(PR_CAPBSET_DROP, cap) for each capability to drop.
+    Must be called with CAP_SETPCAP in the effective set (available
+    as fake root in user namespaces or as real root).
+    """
+    if not _libc:
+        return False
+    dropped = 0
+    for cap in range(_CAP_LAST_CAP + 1):
+        if cap not in _DOCKER_DEFAULT_CAPS:
+            ret = _libc.prctl(PR_CAPBSET_DROP, cap, 0, 0, 0)
+            if ret == 0:
+                dropped += 1
+    logger.debug("Dropped %d capabilities from bounding set", dropped)
+    return dropped > 0
 
 
 # ======================================================================

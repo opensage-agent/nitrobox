@@ -94,6 +94,8 @@ class SandboxConfig:
     landlock_read: Optional[list[str]] = None
     landlock_write: Optional[list[str]] = None
     landlock_tcp_ports: Optional[list[int]] = None
+    oom_score_adj: Optional[int] = None
+    cpuset_cpus: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not self.rootfs_cache_dir:
