@@ -183,6 +183,7 @@ class RootfulSandbox(SandboxBase):
             "cgroup_v2": self._cgroup_path is not None,
             "seccomp": config.seccomp,
             "netns": config.net_isolate,
+            "timens": True,
             "cpuset_cpus": config.cpuset_cpus,
             "oom_score_adj": config.oom_score_adj,
             "mask_paths": True,
