@@ -30,6 +30,14 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -e ".[dev]"
+      - name: Debug adl-seccomp
+        run: |
+          set -x
+          uname -r
+          file src/agentdocker_lite/_vendor/adl-seccomp
+          chmod +x src/agentdocker_lite/_vendor/adl-seccomp
+          # Does the binary run at all on this runner?
+          sudo timeout 5 src/agentdocker_lite/_vendor/adl-seccomp /bin/echo "adl-seccomp-ok" 2>&1 || echo "BINARY-FAILED"
       - run: sudo -E $(which python) -m pytest tests/test_sandbox.py tests/test_security.py -v -k "not UserNamespace"
       - run: sudo -E $(which python) -m pytest tests/test_checkpoint.py -v
 
