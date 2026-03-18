@@ -607,8 +607,20 @@ class SandboxBase(abc.ABC):
                 capture_output=True,
             )
 
+        # Re-write seccomp helper for userns mode (upper dir was replaced).
         if self._config.seccomp and self._userns:
-            self._write_seccomp_helper_userns()
+            from agentdocker_lite.security import build_seccomp_bpf
+            bpf_bytes = build_seccomp_bpf()
+            if bpf_bytes and upper:
+                tmp_dir = upper / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
+                vendor_dir = Path(__file__).parent / "_vendor"
+                helper_src = vendor_dir / "adl-seccomp"
+                if helper_src.exists():
+                    import shutil as _shutil
+                    _shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
+                    (tmp_dir / ".adl_seccomp").chmod(0o755)
 
         self._persistent_shell.start()
         logger.debug("Snapshot restored: %s -> %s", path, upper)
