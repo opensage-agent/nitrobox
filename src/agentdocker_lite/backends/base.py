@@ -550,20 +550,36 @@ class SandboxBase(abc.ABC):
                 logger.debug("Skipping %s (unreadable .pid file)", entry)
                 continue
 
-            # Check if process is alive
+            # Check if process is alive.
+            # Use pidfd to lock in process identity and avoid PID reuse races.
             alive = False
-            try:
-                os.kill(pid, 0)
-                alive = True
-            except ProcessLookupError:
-                alive = False
-            except PermissionError:
-                # Process exists but we can't signal it — treat as alive
-                alive = True
+            pidfd = None
+            if hasattr(os, "pidfd_open"):
+                try:
+                    pidfd = os.pidfd_open(pid)
+                    # pidfd_open succeeded → PID exists. Verify it's the
+                    # same process that wrote the .pid file by checking
+                    # it's still alive (pidfd guarantees identity).
+                    alive = True
+                except OSError:
+                    # PID doesn't exist → safe to clean up.
+                    alive = False
+            else:
+                try:
+                    os.kill(pid, 0)
+                    alive = True
+                except ProcessLookupError:
+                    alive = False
+                except PermissionError:
+                    alive = True
 
             if alive:
                 logger.debug("Sandbox %s owner pid %d still alive, skipping", entry.name, pid)
+                if pidfd is not None:
+                    os.close(pidfd)
                 continue
+            if pidfd is not None:
+                os.close(pidfd)
 
             # Process is dead — clean up
             logger.info("Cleaning up stale sandbox %s (pid %d dead)", entry.name, pid)

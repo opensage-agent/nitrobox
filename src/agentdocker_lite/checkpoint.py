@@ -604,10 +604,24 @@ class _RestoredProcess:
 
     def __init__(self, pid: int, stdin_fd: int, stdout_fd: int):
         self.pid = pid
+        self._pidfd: Optional[int] = None
+        if hasattr(os, "pidfd_open"):
+            try:
+                self._pidfd = os.pidfd_open(pid)
+            except OSError:
+                pass
         self.stdin = os.fdopen(stdin_fd, "wb", buffering=0) if stdin_fd >= 0 else None
         self.stdout = os.fdopen(stdout_fd, "rb", buffering=0) if stdout_fd >= 0 else None
 
     def poll(self) -> Optional[int]:
+        # pidfd-based liveness check (race-free, works for non-child processes).
+        if self._pidfd is not None and hasattr(os, "pidfd_send_signal"):
+            try:
+                os.pidfd_send_signal(self._pidfd, 0)  # signal 0 = liveness check
+                return None  # alive
+            except OSError:
+                return -1  # dead
+        # Fallback to waitpid / /proc check.
         try:
             pid, status = os.waitpid(self.pid, os.WNOHANG)
             if pid == 0:
@@ -627,6 +641,12 @@ class _RestoredProcess:
                 os.kill(self.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+        if self._pidfd is not None:
+            try:
+                os.close(self._pidfd)
+            except OSError:
+                pass
+            self._pidfd = None
 
     def wait(self, timeout: Optional[float] = None) -> int:
         import time

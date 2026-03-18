@@ -75,6 +75,7 @@ class _PersistentShell:
         self._systemd_scope_properties = systemd_scope_properties
         self._hostname = hostname
         self._process: Optional[subprocess.Popen] = None
+        self._pidfd: Optional[int] = None
         self._master_fd: Optional[int] = None
         self._lock = threading.Lock()
         self._signal_r: Optional[int] = None
@@ -285,6 +286,13 @@ class _PersistentShell:
                 f"(rootfs={self._rootfs}, shell={self._shell})"
             )
 
+        # Create pidfd for race-free process management.
+        if hasattr(os, "pidfd_open"):
+            try:
+                self._pidfd = os.pidfd_open(self._process.pid)
+            except OSError:
+                self._pidfd = None
+
         # Clean up old root mounts left by pivot_root (rootful mode only).
         if not self._userns:
             self._cleanup_pivot_old()
@@ -381,6 +389,12 @@ class _PersistentShell:
             except OSError:
                 pass
             self._master_fd = None
+        if self._pidfd is not None:
+            try:
+                os.close(self._pidfd)
+            except OSError:
+                pass
+            self._pidfd = None
         if self._signal_r is not None:
             try:
                 os.close(self._signal_r)
