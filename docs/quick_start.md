@@ -279,16 +279,33 @@ print(sb.features)
 
 ## Performance
 
+### Single-operation latency
+
 | | Docker | agentdocker-lite | Speedup |
 |---|---|---|---|
-| Create | 383ms | 12ms | **31x** |
-| Per command | 19ms | 11ms | **1.8x** |
-| Reset | 558ms | 12ms | **46x** |
-| Delete | 209ms | 1.2ms | **174x** |
-| CRIU save | *(experimental)* | 7ms | — |
-| CRIU restore | *(experimental)* | 13ms | — |
+| Create | 286ms | 18ms | **16x** |
+| Per command | 17ms | 11ms | **1.7x** |
+| Reset | 494ms | 17ms | **29x** |
+| Delete | 214ms | 1.7ms | **126x** |
+| CRIU save | — | 7ms | — |
+| CRIU restore | — | 13ms | — |
 
-No root required (except CRIU checkpoint). Reproduce: `python examples/benchmark.py`
+### Sustained workloads
+
+| | Docker | agentdocker-lite | Speedup |
+|---|---|---|---|
+| Throughput (1000 cmds) | 57 cmd/s | 95 cmd/s | **1.7x** |
+| Reset loop (100 cycles) | 2.0/s | 34.7/s | **17.6x** |
+| CRIU restore loop (50 cycles) | — | 38.2/s | — |
+| 4x concurrent (10 cmds each) | 27 cmd/s | 302 cmd/s | **11.3x** |
+| 8x concurrent | 31 cmd/s | 559 cmd/s | **18.1x** |
+| 16x concurrent | 32 cmd/s | 893 cmd/s | **27.9x** |
+
+Measured on AMD Ryzen 9 9950X, ubuntu:22.04, kernel 6.19. Reproduce:
+
+```bash
+sudo python examples/benchmark.py
+```
 
 ## Docker migration cheatsheet
 
