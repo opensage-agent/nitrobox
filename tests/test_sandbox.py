@@ -10,7 +10,6 @@ import os
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 
 import pytest
 
@@ -89,7 +88,7 @@ class TestRun:
     def test_multiline_output(self, sandbox):
         output, ec = sandbox.run("echo line1 && echo line2 && echo line3")
         assert ec == 0
-        lines = [l for l in output.strip().split("\n") if l]
+        lines = [line for line in output.strip().split("\n") if line]
         assert len(lines) == 3
 
     def test_working_dir(self, sandbox):
@@ -414,3 +413,154 @@ class TestNetIsolate:
         # Should see more than just loopback
         lines = output.strip().split("\n")
         assert len(lines) > 1
+
+
+# ------------------------------------------------------------------ #
+#  Popen                                                               #
+# ------------------------------------------------------------------ #
+
+
+class TestPopen:
+    def test_basic_popen(self, sandbox):
+        proc = sandbox.popen("echo popen_test")
+        line = proc.stdout.readline()
+        assert b"popen_test" in line
+        proc.wait()
+
+    def test_popen_stdin(self, sandbox):
+        proc = sandbox.popen("bash")
+        proc.stdin.write(b"echo from_stdin\n")
+        proc.stdin.flush()
+        line = proc.stdout.readline()
+        assert b"from_stdin" in line
+        proc.terminate()
+
+    def test_popen_exit_code(self, sandbox):
+        proc = sandbox.popen("exit 42")
+        assert proc.wait() == 42
+
+
+# ------------------------------------------------------------------ #
+#  Filesystem snapshots                                                #
+# ------------------------------------------------------------------ #
+
+
+class TestFsSnapshot:
+    def test_save_and_restore(self, sandbox, tmp_path):
+        sandbox.run("echo v1 > /workspace/data.txt")
+        ckpt = str(tmp_path / "snap")
+        sandbox.fs_snapshot(ckpt)
+
+        sandbox.run("echo v2 > /workspace/data.txt")
+        sandbox.fs_restore(ckpt)
+
+        output, ec = sandbox.run("cat /workspace/data.txt")
+        assert ec == 0
+        assert "v1" in output
+
+    def test_restore_nonexistent_raises(self, sandbox):
+        with pytest.raises(FileNotFoundError):
+            sandbox.fs_restore("/tmp/nonexistent_snapshot")
+
+    def test_reset_after_restore(self, sandbox, tmp_path):
+        """reset() returns to clean image, not to snapshot."""
+        sandbox.run("echo snap > /workspace/data.txt")
+        ckpt = str(tmp_path / "snap")
+        sandbox.fs_snapshot(ckpt)
+        sandbox.fs_restore(ckpt)
+
+        sandbox.reset()
+        output, ec = sandbox.run("cat /workspace/data.txt 2>&1")
+        assert ec != 0  # file gone after reset
+
+
+# ------------------------------------------------------------------ #
+#  Volumes                                                             #
+# ------------------------------------------------------------------ #
+
+
+class TestVolumes:
+    def test_ro_volume(self, tmp_path):
+        _requires_root()
+        _requires_docker()
+        host_dir = tmp_path / "host_data"
+        host_dir.mkdir()
+        (host_dir / "file.txt").write_text("host_content")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+            volumes=[f"{host_dir}:/mnt/data:ro"],
+        )
+        sb = Sandbox(config, name="vol-ro")
+        try:
+            output, ec = sb.run("cat /mnt/data/file.txt")
+            assert ec == 0
+            assert "host_content" in output
+
+            # Write should fail
+            _, ec = sb.run("touch /mnt/data/new_file 2>&1")
+            assert ec != 0
+        finally:
+            sb.delete()
+
+    def test_rw_volume(self, tmp_path):
+        _requires_root()
+        _requires_docker()
+        host_dir = tmp_path / "host_rw"
+        host_dir.mkdir()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+            volumes=[f"{host_dir}:/mnt/data:rw"],
+        )
+        sb = Sandbox(config, name="vol-rw")
+        try:
+            sb.run("echo written_from_sandbox > /mnt/data/output.txt")
+            assert (host_dir / "output.txt").read_text().strip() == "written_from_sandbox"
+        finally:
+            sb.delete()
+
+
+# ------------------------------------------------------------------ #
+#  Features, pressure, reclaim                                         #
+# ------------------------------------------------------------------ #
+
+
+class TestObservability:
+    def test_features_dict(self, sandbox):
+        assert isinstance(sandbox.features, dict)
+        assert "seccomp" in sandbox.features
+        assert "mask_paths" in sandbox.features
+        assert "cap_drop" in sandbox.features
+
+    def test_pressure(self, tmp_path):
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+            cpu_max="50000 100000",
+        )
+        sb = Sandbox(config, name="psi-test")
+        try:
+            psi = sb.pressure()
+            assert isinstance(psi, dict)
+            if psi:  # cgroup v2 available
+                assert "cpu" in psi
+                assert "avg10" in psi["cpu"]
+        finally:
+            sb.delete()
+
+    def test_reclaim_memory(self, sandbox):
+        sandbox.run("echo hello")
+        result = sandbox.reclaim_memory()
+        # Should return bool, True if pidfd + process_madvise available
+        assert isinstance(result, bool)

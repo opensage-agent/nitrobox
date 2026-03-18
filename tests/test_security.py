@@ -236,7 +236,6 @@ class TestHardening:
         )
         sb = Sandbox(config, name="oom-test")
         try:
-            import os
             pid = sb._persistent_shell._process.pid
             score = open(f"/proc/{pid}/oom_score_adj").read().strip()
             assert score == "500"
