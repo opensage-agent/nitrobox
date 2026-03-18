@@ -253,8 +253,8 @@ SandboxBase.cleanup_stale()
 | Per command | 19ms | 11ms | **1.8x** |
 | Reset | 558ms | 12ms | **46x** |
 | Delete | 209ms | 1.2ms | **174x** |
-| CRIU save | ~1000ms | 7ms | **~140x** |
-| CRIU restore | ~1000ms | 13ms | **~77x** |
+| CRIU save | *(experimental)* | 7ms | — |
+| CRIU restore | *(experimental)* | 13ms | — |
 
 No root required (except CRIU checkpoint). Reproduce: `python examples/benchmark.py`
 
