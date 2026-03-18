@@ -107,7 +107,7 @@ Uses a vendored `pasta` binary (bundled, no install needed). The sandbox gets an
 
 ## Filesystem snapshots
 
-Save and restore sandbox filesystem state (lightweight alternative to CRIU):
+Save and restore sandbox filesystem state:
 
 ```python
 sb.run("echo v1 > /workspace/data.txt")
@@ -117,6 +117,57 @@ sb.run("echo v2 > /workspace/data.txt")
 sb.restore("/tmp/checkpoint_v1")     # restore to v1
 
 sb.reset()                           # back to clean image (not snapshot)
+```
+
+## Process checkpointing (CRIU)
+
+Full process-state checkpoint/restore: memory, registers, environment variables, cwd — everything. Useful for partial rollout in RL training where agent trajectories need to continue from a previous state.
+
+**Zero runtime overhead** — CRIU only runs during save/restore, no interposition on normal exec.
+
+**Requirements**: `criu` >= 4.0, root.
+
+```bash
+# Install CRIU
+# Arch:   pacman -S criu
+# Ubuntu: apt install criu
+# Fedora: dnf install criu
+```
+
+```python
+from agentdocker_lite import Sandbox, SandboxConfig, CheckpointManager
+
+config = SandboxConfig(image="ubuntu:22.04", working_dir="/workspace")
+sb = Sandbox(config, name="worker-0")
+mgr = CheckpointManager(sb)
+
+# Set up some complex state
+sb.run("export MY_VAR=hello && cd /tmp && echo 'state v1' > progress.txt")
+
+# Save full process state (filesystem + memory + env + cwd)
+mgr.save("/tmp/ckpt_v1")
+# Sandbox keeps running — save() doesn't kill it (--leave-running)
+
+# Agent does more work...
+sb.run("rm -rf /workspace/* && echo 'state v2' > /tmp/progress.txt")
+
+# Rollback: exact restore to checkpoint (env vars, cwd, everything)
+mgr.restore("/tmp/ckpt_v1")
+
+output, _ = sb.run("cat /tmp/progress.txt")
+print(output)  # "state v1\n" — fully restored
+
+sb.delete()
+```
+
+### Check CRIU availability
+
+```python
+if CheckpointManager.check_available():
+    mgr = CheckpointManager(sb)
+else:
+    print("CRIU not available, falling back to filesystem-only snapshots")
+    # sb.snapshot() / sb.restore() still works for filesystem state
 ```
 
 ## Container configuration
@@ -233,8 +284,10 @@ No root required. Reproduce: `python examples/benchmark.py`
 | `--read-only` | `read_only=True` |
 | `--network none` | `net_isolate=True` |
 | `-p 8080:80` | `net_isolate=True, port_map=["8080:80"]` |
-| `docker commit` / `docker save` | `sb.snapshot("/path")` |
-| `docker import` / `docker load` | `sb.restore("/path")` |
+| `docker commit` / `docker save` | `sb.snapshot("/path")` (filesystem only) |
+| `docker import` / `docker load` | `sb.restore("/path")` (filesystem only) |
+| `docker checkpoint create` (CRIU) | `CheckpointManager(sb).save("/path")` (full process state) |
+| `docker start --checkpoint` | `CheckpointManager(sb).restore("/path")` |
 | `--gpus all` | `devices=["/dev/nvidia0", ...]` (root only) |
 | `-e KEY=value` | `environment={"KEY": "value"}` |
 | `--device /dev/kvm` | `devices=["/dev/kvm"]` (root only) |
