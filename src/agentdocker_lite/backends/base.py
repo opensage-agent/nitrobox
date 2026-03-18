@@ -440,6 +440,13 @@ class SandboxBase(abc.ABC):
 
         self._persistent_shell.kill()
 
+        # Unmount overlayfs to flush kernel dentry cache (rootful only).
+        # In userns mode, the setup script remounts fresh on shell restart.
+        rootfs = getattr(self, "_rootfs", None)
+        base_rootfs = getattr(self, "_base_rootfs", None)
+        if not self._userns and rootfs:
+            subprocess.run(["umount", str(rootfs)], capture_output=True)
+
         # Clear upper and replace with snapshot
         if self._userns:
             for child in upper.iterdir():
@@ -462,6 +469,19 @@ class SandboxBase(abc.ABC):
                         pass
             shutil.rmtree(work)
             work.mkdir(parents=True)
+
+        # Remount overlayfs (rootful only).
+        if not self._userns and rootfs and base_rootfs and work:
+            subprocess.run(
+                [
+                    "mount", "-t", "overlay", "overlay", "-o",
+                    f"lowerdir={base_rootfs},"
+                    f"upperdir={upper},"
+                    f"workdir={work}",
+                    str(rootfs),
+                ],
+                capture_output=True,
+            )
 
         if self._config.seccomp and self._userns:
             self._write_seccomp_helper_userns()
