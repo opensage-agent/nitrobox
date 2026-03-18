@@ -108,6 +108,22 @@ if psi.get("cpu", {}).get("avg10", 0) > 50:
     print(f"Sandbox {sb} is CPU-bottlenecked!")
 ```
 
+### Memory reclamation
+
+Hint the kernel to swap out idle sandbox memory — useful when GPU training needs RAM:
+
+```python
+# Sandboxes waiting for training step
+for sb in idle_sandboxes:
+    sb.reclaim_memory()  # kernel swaps out cold pages
+
+# Resume — memory pages back in transparently
+for sb in idle_sandboxes:
+    sb.run(next_action)
+```
+
+Requires swap (zram or disk). Returns `False` if kernel doesn't support `process_madvise`.
+
 ## Port mapping (pasta networking)
 
 ```python

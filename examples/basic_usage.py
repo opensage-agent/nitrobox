@@ -79,6 +79,17 @@ def main():
     output, _ = sb.run("cat /proc/kcore 2>&1 | wc -c")
     print(f"/proc/kcore bytes (masked → 0): {output.strip()}")
 
+    # ---- Pressure monitoring (PSI) ----
+    psi = sb.pressure()
+    if psi:
+        print(f"PSI: cpu={psi.get('cpu', {}).get('avg10', 0):.1f}% "
+              f"mem={psi.get('memory', {}).get('avg10', 0):.1f}% "
+              f"io={psi.get('io', {}).get('avg10', 0):.1f}%")
+
+    # ---- Memory reclamation ----
+    reclaimed = sb.reclaim_memory()
+    print(f"reclaim_memory: {'ok' if reclaimed else 'not supported'}")
+
     # ---- Clean up ----
     sb.delete()
     print("Done.")
