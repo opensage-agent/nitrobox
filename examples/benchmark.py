@@ -302,6 +302,98 @@ def bench_checkpoint_loop() -> dict | None:
     }
 
 
+def bench_ab_comparison() -> None:
+    """Side-by-side timing comparison against real Docker.
+
+    Matches Harbor's DockerEnvironment flow:
+      Docker:           docker build → docker run -d → docker exec (N times) → docker rm -f
+      AgentDockerLite:  Sandbox(config) → sb.run() (N times) → sb.delete()
+    """
+    from agentdocker_lite import Sandbox, SandboxConfig
+
+    commands = [
+        "echo hello",
+        "python3 --version 2>&1 || true",
+        "ls /",
+        "cat /etc/os-release | head -1",
+        "echo done > /tmp/out.txt && cat /tmp/out.txt",
+    ]
+
+    docker_tag = "adl_bench_docker"
+    docker_container = "adl_bench_container"
+
+    # ── AgentDockerLite ──
+    config = SandboxConfig(image=IMAGE, working_dir="/app")
+    t0 = time.monotonic()
+    sb = Sandbox(config, name="bench-ab")
+    adl_start = (time.monotonic() - t0) * 1000
+
+    adl_exec_times = []
+    for cmd in commands:
+        t = time.monotonic()
+        sb.run(cmd)
+        adl_exec_times.append((time.monotonic() - t) * 1000)
+
+    t0 = time.monotonic()
+    sb.delete()
+    adl_stop = (time.monotonic() - t0) * 1000
+
+    # ── Docker (matches Harbor's DockerEnvironment flow) ──
+    subprocess.run(["docker", "rm", "-f", docker_container], capture_output=True)
+
+    # Build + start
+    t0 = time.monotonic()
+    subprocess.run(
+        ["docker", "build", "-t", docker_tag, "-"],
+        input=b"FROM ubuntu:22.04\nRUN mkdir -p /app\nWORKDIR /app\n",
+        capture_output=True, check=True,
+    )
+    subprocess.run(
+        ["docker", "run", "-d", "--name", docker_container, docker_tag, "sleep", "infinity"],
+        capture_output=True, check=True,
+    )
+    docker_start = (time.monotonic() - t0) * 1000
+
+    docker_exec_times = []
+    for cmd in commands:
+        t = time.monotonic()
+        subprocess.run(
+            ["docker", "exec", docker_container, "bash", "-c", cmd],
+            capture_output=True, text=True, timeout=30,
+        )
+        docker_exec_times.append((time.monotonic() - t) * 1000)
+
+    t0 = time.monotonic()
+    subprocess.run(["docker", "rm", "-f", docker_container], capture_output=True)
+    subprocess.run(["docker", "rmi", "-f", docker_tag], capture_output=True)
+    docker_stop = (time.monotonic() - t0) * 1000
+
+    # ── Print comparison ──
+    print("\n" + "=" * 70)
+    print("  A/B Benchmark: AgentDockerLite vs Docker")
+    print("  (Docker flow: build + run -d + exec + rm, like Harbor)")
+    print("=" * 70)
+    print(f"  {'Operation':30s} {'ADL':>10s} {'Docker':>10s} {'Speedup':>10s}")
+    print(f"  {'-'*30} {'-'*10} {'-'*10} {'-'*10}")
+
+    def _row(label, a, d):
+        sp = d / a if a > 0 else float("inf")
+        print(f"  {label:30s} {a:7.1f} ms {d:7.1f} ms {sp:8.1f}x")
+
+    _row("Create / Start", adl_start, docker_start)
+    adl_exec_mean = sum(adl_exec_times) / len(adl_exec_times)
+    docker_exec_mean = sum(docker_exec_times) / len(docker_exec_times)
+    _row("Exec (mean)", adl_exec_mean, docker_exec_mean)
+    _row("Stop / Cleanup", adl_stop, docker_stop)
+
+    print()
+    print(f"  {'Per-command breakdown':30s} {'ADL':>10s} {'Docker':>10s} {'Speedup':>10s}")
+    print(f"  {'-'*30} {'-'*10} {'-'*10} {'-'*10}")
+    for i, cmd in enumerate(commands):
+        _row(cmd[:28], adl_exec_times[i], docker_exec_times[i])
+    print("=" * 70)
+
+
 def bench_concurrent() -> dict:
     """Parallel sandboxes — measures scalability."""
     from concurrent.futures import ThreadPoolExecutor
@@ -402,7 +494,10 @@ def main():
     else:
         print("  Skipped (requires root + CRIU)")
 
-    print("Concurrent sandboxes (4/8/16 parallel, 10 cmds each)...")
+    print("\n--- A/B comparison (Harbor-style flow) ---\n")
+    bench_ab_comparison()
+
+    print("\nConcurrent sandboxes (4/8/16 parallel, 10 cmds each)...")
     docker_conc = bench_docker_concurrent()
     adl_conc = bench_concurrent()
     for n in [4, 8, 16]:
