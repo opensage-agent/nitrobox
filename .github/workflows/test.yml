@@ -13,13 +13,16 @@ jobs:
     name: Rootless tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14"]
+    continue-on-error: ${{ matrix.python-version == '3.14' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
       - run: pip install -e ".[dev]"
       - name: Enable unprivileged user namespaces
         run: |
@@ -31,13 +34,16 @@ jobs:
     name: Root tests (py${{ matrix.python-version }})
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.12", "3.13"]
+        python-version: ["3.12", "3.13", "3.14"]
+    continue-on-error: ${{ matrix.python-version == '3.14' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
+          allow-prereleases: true
       - run: pip install -e ".[dev]"
       - run: sudo -E $(which python) -m pytest tests/test_sandbox.py tests/test_security.py -v -k "not UserNamespace"
       - run: sudo -E $(which python) -m pytest tests/test_checkpoint.py -v

@@ -1,5 +1,10 @@
 # agentdocker-lite
 
+[![Tests](https://github.com/rucnyz/agentdocker-lite/actions/workflows/test.yml/badge.svg)](https://github.com/rucnyz/agentdocker-lite/actions/workflows/test.yml)
+[![PyPI](https://img.shields.io/pypi/v/agentdocker-lite)](https://pypi.org/project/agentdocker-lite/)
+[![Python](https://img.shields.io/pypi/pyversions/agentdocker-lite)](https://pypi.org/project/agentdocker-lite/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Lightweight Linux namespace sandbox with persistent shell and instant filesystem reset.
 
 **20–100x faster lifecycle** than Docker. Designed for high-frequency workloads like RL training where environments are created, reset, and destroyed thousands of times.
