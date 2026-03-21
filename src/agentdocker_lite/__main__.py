@@ -22,10 +22,11 @@ def main() -> int:
         "cleanup",
         help="Clean up orphaned sandboxes left by crashed processes",
     )
+    import os as _os
     cleanup_parser.add_argument(
         "--env-base-dir",
-        default="/tmp/agentdocker_lite",
-        help="Base directory for sandbox state (default: /tmp/agentdocker_lite)",
+        default=f"/tmp/agentdocker_lite_{_os.getuid()}",
+        help="Base directory for sandbox state (default: /tmp/agentdocker_lite_<uid>)",
     )
 
     args = parser.parse_args()

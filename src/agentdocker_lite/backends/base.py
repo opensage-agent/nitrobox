@@ -94,7 +94,7 @@ class SandboxConfig:
     volumes: list[str] = field(default_factory=list)
     devices: list[str] = field(default_factory=list)
     fs_backend: str = "overlayfs"
-    env_base_dir: str = "/tmp/agentdocker_lite"
+    env_base_dir: str = ""  # resolved in __post_init__
     rootfs_cache_dir: str = ""  # resolved in __post_init__
     cpu_max: Optional[str] = None
     memory_max: Optional[str] = None
@@ -114,6 +114,8 @@ class SandboxConfig:
     cpuset_cpus: Optional[str] = None
 
     def __post_init__(self) -> None:
+        if not self.env_base_dir:
+            self.env_base_dir = f"/tmp/agentdocker_lite_{os.getuid()}"
         if not self.rootfs_cache_dir:
             cache_home = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
             self.rootfs_cache_dir = os.path.join(cache_home, "agentdocker_lite", "rootfs")
@@ -734,7 +736,7 @@ class SandboxBase(abc.ABC):
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def cleanup_stale(env_base_dir: str = "/tmp/agentdocker_lite") -> int:
+    def cleanup_stale(env_base_dir: str = "") -> int:
         """Clean up orphaned sandboxes left by crashed processes.
 
         Scans *env_base_dir* for sandbox directories, checks if the owner
@@ -744,6 +746,8 @@ class SandboxBase(abc.ABC):
         Returns:
             Number of cleaned-up sandboxes.
         """
+        if not env_base_dir:
+            env_base_dir = f"/tmp/agentdocker_lite_{os.getuid()}"
         base = Path(env_base_dir)
         if not base.exists():
             return 0
