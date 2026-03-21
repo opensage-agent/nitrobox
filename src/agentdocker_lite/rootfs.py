@@ -336,7 +336,17 @@ def _write_manifest(
 
 
 def _pull_or_check_local(image_name: str) -> None:
-    """Pull image, falling back to local if pull fails but image exists."""
+    """Ensure image is available locally, pulling only if needed."""
+    # Check local first (like `docker run` behavior)
+    check = subprocess.run(
+        ["docker", "image", "inspect", image_name],
+        capture_output=True,
+    )
+    if check.returncode == 0:
+        logger.debug("Image exists locally: %s", image_name)
+        return
+
+    # Not local — pull
     logger.info("Pulling image: %s", image_name)
     result = subprocess.run(
         ["docker", "pull", image_name],
@@ -344,13 +354,7 @@ def _pull_or_check_local(image_name: str) -> None:
         text=True,
     )
     if result.returncode != 0:
-        check = subprocess.run(
-            ["docker", "image", "inspect", image_name],
-            capture_output=True,
-        )
-        if check.returncode != 0:
-            raise RuntimeError(f"docker pull failed: {result.stderr.strip()}")
-        logger.info("Pull failed but image exists locally: %s", image_name)
+        raise RuntimeError(f"docker pull failed: {result.stderr.strip()}")
 
 
 def prepare_rootfs_from_docker(
