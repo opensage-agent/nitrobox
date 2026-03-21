@@ -1298,6 +1298,74 @@ class TestRegistry:
 
 
 # ------------------------------------------------------------------ #
+#  Snapshot API                                                         #
+# ------------------------------------------------------------------ #
+
+
+class TestSnapshot:
+    def test_save_and_restore(self, sandbox):
+        """snapshot() saves state, restore() returns to it."""
+        sandbox.run("echo v1 > /workspace/data.txt")
+        sid = sandbox.snapshot()
+        sandbox.run("echo v2 > /workspace/data.txt")
+        sandbox.restore(sid)
+        out, _ = sandbox.run("cat /workspace/data.txt")
+        assert "v1" in out
+
+    def test_multiple_snapshots(self, sandbox):
+        """Multiple snapshots with restore to any point."""
+        sandbox.run("echo s0 > /workspace/log.txt")
+        s0 = sandbox.snapshot()
+        sandbox.run("echo s1 >> /workspace/log.txt")
+        s1 = sandbox.snapshot()
+        sandbox.run("echo s2 >> /workspace/log.txt")
+        s2 = sandbox.snapshot()
+
+        sandbox.restore(s0)
+        out, _ = sandbox.run("cat /workspace/log.txt")
+        assert out.strip() == "s0"
+
+        sandbox.restore(s2)
+        out, _ = sandbox.run("cat /workspace/log.txt")
+        assert "s2" in out
+
+    def test_list_snapshots(self, sandbox):
+        """list_snapshots() returns sorted IDs."""
+        s0 = sandbox.snapshot()
+        s1 = sandbox.snapshot()
+        assert sandbox.list_snapshots() == [s0, s1]
+
+    def test_delete_snapshot(self, sandbox):
+        """delete_snapshot() removes a specific snapshot."""
+        s0 = sandbox.snapshot()
+        s1 = sandbox.snapshot()
+        sandbox.delete_snapshot(s0)
+        assert sandbox.list_snapshots() == [s1]
+
+    def test_restore_nonexistent_raises(self, sandbox):
+        """restore() with invalid ID raises FileNotFoundError."""
+        with pytest.raises(FileNotFoundError):
+            sandbox.restore(999)
+
+    def test_tree_branch(self, sandbox):
+        """Simulate tree search: branch from a checkpoint."""
+        sandbox.run("echo base > /workspace/state.txt")
+        branch_point = sandbox.snapshot()
+
+        # Branch A
+        sandbox.run("echo branch_a >> /workspace/state.txt")
+        out_a, _ = sandbox.run("cat /workspace/state.txt")
+
+        # Restore and try Branch B
+        sandbox.restore(branch_point)
+        sandbox.run("echo branch_b >> /workspace/state.txt")
+        out_b, _ = sandbox.run("cat /workspace/state.txt")
+
+        assert "branch_a" in out_a and "branch_b" not in out_a
+        assert "branch_b" in out_b and "branch_a" not in out_b
+
+
+# ------------------------------------------------------------------ #
 #  Async API                                                            #
 # ------------------------------------------------------------------ #
 

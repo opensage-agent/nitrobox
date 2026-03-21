@@ -705,6 +705,75 @@ class SandboxBase(abc.ABC):
         self._persistent_shell.start()
         logger.debug("Snapshot restored: %s -> %s", path, upper)
 
+    # -- High-level snapshot API ---------------------------------------- #
+
+    _snapshot_counter: int = 0
+
+    def snapshot(self) -> int:
+        """Save current filesystem state, returning a snapshot ID.
+
+        Lightweight wrapper over :meth:`fs_snapshot` with automatic
+        path and ID management.  Use :meth:`restore` to return to
+        this state.
+
+        Returns:
+            Snapshot ID (auto-incrementing integer).
+        """
+        snap_dir = self._env_dir / "snapshots"
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        sid = self._snapshot_counter
+        self._snapshot_counter += 1
+        self.fs_snapshot(str(snap_dir / str(sid)))
+        logger.debug("Snapshot %d saved", sid)
+        return sid
+
+    def restore(self, snapshot_id: int) -> None:
+        """Restore filesystem to a previously saved snapshot.
+
+        Args:
+            snapshot_id: ID returned by :meth:`snapshot`.
+        """
+        snap_path = self._env_dir / "snapshots" / str(snapshot_id)
+        if not snap_path.exists():
+            raise FileNotFoundError(
+                f"Snapshot {snapshot_id} not found. "
+                f"Available: {self.list_snapshots()}"
+            )
+        self.fs_restore(str(snap_path))
+        self._snapshot_counter = snapshot_id + 1
+        logger.debug("Restored to snapshot %d", snapshot_id)
+
+    def list_snapshots(self) -> list[int]:
+        """Return sorted list of available snapshot IDs."""
+        snap_dir = self._env_dir / "snapshots"
+        if not snap_dir.exists():
+            return []
+        return sorted(
+            int(p.name) for p in snap_dir.iterdir()
+            if p.is_dir() and p.name.isdigit()
+        )
+
+    def delete_snapshot(self, snapshot_id: int) -> None:
+        """Delete a specific snapshot to free disk space.
+
+        Args:
+            snapshot_id: ID returned by :meth:`snapshot`.
+        """
+        snap_path = self._env_dir / "snapshots" / str(snapshot_id)
+        if snap_path.exists():
+            shutil.rmtree(snap_path)
+            logger.debug("Deleted snapshot %d", snapshot_id)
+
+    async def asnapshot(self) -> int:
+        """Async version of :meth:`snapshot`."""
+        import asyncio
+        return await asyncio.to_thread(self.snapshot)
+
+    async def arestore(self, snapshot_id: int) -> None:
+        """Async version of :meth:`restore`."""
+        import asyncio
+        await asyncio.to_thread(self.restore, snapshot_id)
+
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
     # ------------------------------------------------------------------ #

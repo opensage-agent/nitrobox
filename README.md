@@ -128,8 +128,10 @@ SandboxConfig(
 | `sb.check_background(handle)` | Check output and status |
 | `sb.list_background()` | List all background processes |
 | `sb.stop_background(handle)` | Stop a background process |
-| `sb.fs_snapshot(path)` | Save filesystem state |
-| `sb.fs_restore(path)` | Restore filesystem state |
+| `sb.snapshot()` | Save filesystem state, returns snapshot ID |
+| `sb.restore(sid)` | Restore to a previous snapshot |
+| `sb.list_snapshots()` | List available snapshot IDs |
+| `sb.delete_snapshot(sid)` | Delete a snapshot |
 | `sb.save_as_image(name)` | Export sandbox as Docker image |
 | `sb.pressure()` | cgroup v2 PSI (cpu/memory/io) |
 | `sb.reclaim_memory()` | Hint kernel to swap out idle pages |
@@ -139,9 +141,28 @@ SandboxConfig(
 | `await sb.areset()` | Async version of `reset()` |
 | `await sb.adelete()` | Async version of `delete()` |
 
+### Snapshots (RL step-wise rollback)
+
+Save and restore filesystem state at any point. Useful for tree search, partial rollback, and best-of-N exploration:
+
+```python
+sb.run("echo base > /workspace/state.txt")
+branch = sb.snapshot()
+
+# Try action A
+sb.run("echo action_a >> /workspace/state.txt")
+
+# Rollback and try action B
+sb.restore(branch)
+sb.run("echo action_b >> /workspace/state.txt")
+
+sb.list_snapshots()     # [0]
+sb.delete_snapshot(0)   # free space
+```
+
 ### Async API
 
-All core methods have async variants (`arun`, `areset`, `adelete`) for use in async frameworks (Ray, asyncio-based RL loops):
+All core methods have async variants (`arun`, `areset`, `adelete`, `asnapshot`, `arestore`) for use in async frameworks (Ray, asyncio-based RL loops):
 
 ```python
 async def rollout(i):

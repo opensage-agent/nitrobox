@@ -156,18 +156,22 @@ config = SandboxConfig(
 )
 ```
 
-## Filesystem snapshots
+## Snapshots
 
-Save and restore sandbox filesystem state:
+Save and restore filesystem state at any point. Useful for RL step-wise rollback and tree search:
 
 ```python
-sb.run("echo v1 > /workspace/data.txt")
-sb.fs_snapshot("/tmp/checkpoint_v1")    # save current state
+sb.run("echo step0 > /workspace/data.txt")
+s0 = sb.snapshot()                     # → 0
 
-sb.run("echo v2 > /workspace/data.txt")
-sb.fs_restore("/tmp/checkpoint_v1")     # restore to v1
+sb.run("echo step1 >> /workspace/data.txt")
+s1 = sb.snapshot()                     # → 1
 
-sb.reset()                           # back to clean image (not snapshot)
+sb.restore(s0)                         # back to step 0
+sb.list_snapshots()                    # [0, 1]
+sb.delete_snapshot(s1)                 # free space
+
+sb.reset()                             # back to clean image (clears all snapshots)
 ```
 
 ## Save as Docker image
