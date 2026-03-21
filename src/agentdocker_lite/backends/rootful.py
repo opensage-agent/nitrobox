@@ -568,6 +568,14 @@ class RootfulSandbox(SandboxBase):
         """Delete the sandbox and clean up all resources."""
         t0 = time.monotonic()
 
+        # Kill all background processes before killing the shell
+        # (stop_background uses self.run() which needs the shell alive)
+        for handle in list(self._bg_handles):
+            try:
+                self.stop_background(handle)
+            except Exception:
+                pass
+
         self._stop_pasta()
         self._persistent_shell.kill()
 
