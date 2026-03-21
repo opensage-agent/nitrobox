@@ -697,6 +697,14 @@ class SandboxBase(abc.ABC):
                     _shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
                     (tmp_dir / ".adl_seccomp").chmod(0o755)
 
+        # Re-write Landlock config for userns mode (upper dir was replaced).
+        if self._userns and upper:
+            ll_config = self._build_landlock_config(self._config)
+            if ll_config:
+                tmp_dir = upper / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                (tmp_dir / ".adl_landlock").write_text(ll_config)
+
         self._persistent_shell.start()
         logger.debug("Snapshot restored: %s -> %s", path, upper)
 
@@ -792,6 +800,64 @@ class SandboxBase(abc.ABC):
         overlay upper dir in user namespace mode.
         """
         return self._rootfs / container_path.lstrip("/")
+
+    @staticmethod
+    def _build_landlock_config(config: SandboxConfig) -> str | None:
+        """Build Landlock config file content from SandboxConfig.
+
+        Returns None if no Landlock params are configured.
+        Raises RuntimeError if params are set but kernel doesn't support Landlock.
+        Format: first line = mode flags (r/w/p), then R/W/P rules.
+        """
+        if not any([config.writable_paths, config.readable_paths, config.allowed_ports]):
+            return None
+
+        from agentdocker_lite.security import _landlock_abi_version
+        abi = _landlock_abi_version()
+        if abi == 0:
+            raise RuntimeError(
+                "Landlock not available (kernel < 5.13 or CONFIG_SECURITY_LANDLOCK=n), "
+                "but writable_paths/readable_paths/allowed_ports were set. "
+                "Remove these params or upgrade to kernel >= 5.13."
+            )
+        if config.allowed_ports is not None and abi < 4:
+            raise RuntimeError(
+                f"Landlock network port rules require ABI v4+ (kernel 6.7+), "
+                f"but this kernel only supports ABI v{abi}. "
+                f"Remove allowed_ports or upgrade your kernel."
+            )
+
+        mode = ""
+        if config.readable_paths is not None:
+            mode += "r"
+        if config.writable_paths is not None:
+            mode += "w"
+        if config.allowed_ports is not None:
+            mode += "p"
+
+        lines = [mode]
+
+        # Essential writable paths (always included when restricting writes)
+        essential_writable = {"/dev", "/proc", "/tmp"}
+
+        writable_set: set[str] = set()
+        if config.writable_paths is not None:
+            writable_set = set(config.writable_paths) | essential_writable
+            for p in sorted(writable_set):
+                lines.append(f"W {p}")
+
+        if config.readable_paths is not None:
+            essential_readable = {"/dev", "/proc", "/sys", "/tmp"}
+            all_readable = set(config.readable_paths) | essential_readable
+            for p in sorted(all_readable):
+                if p not in writable_set:
+                    lines.append(f"R {p}")
+
+        if config.allowed_ports is not None:
+            for port in config.allowed_ports:
+                lines.append(f"P {port}")
+
+        return "\n".join(lines) + "\n"
 
     def _build_env(self) -> dict[str, str]:
         env = {

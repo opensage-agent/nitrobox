@@ -102,6 +102,9 @@ SandboxConfig(
 
     # Security
     seccomp=True,                   # seccomp-bpf (default: True)
+    writable_paths=["/workspace"],  # Landlock: only these paths writable (None=no restriction)
+    readable_paths=["/usr", "/lib"],# Landlock: only these paths readable (None=no restriction)
+    allowed_ports=[80, 443],        # Landlock: only these TCP ports connectable (None=no restriction)
     # Devices (root only)
     devices=["/dev/nvidia0", "/dev/nvidiactl"],
 )

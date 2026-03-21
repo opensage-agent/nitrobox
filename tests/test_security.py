@@ -1,4 +1,4 @@
-"""Tests for security hardening: seccomp, user namespace mode, devices.
+"""Tests for security hardening: seccomp, Landlock, user namespace mode, devices.
 
 seccomp tests require root. User namespace tests must run as non-root.
 
@@ -13,6 +13,7 @@ import subprocess
 import pytest
 
 from agentdocker_lite import Sandbox, SandboxBase, SandboxConfig
+from agentdocker_lite.security import _landlock_abi_version
 
 TEST_IMAGE = os.environ.get("LITE_SANDBOX_TEST_IMAGE", "ubuntu:22.04")
 
@@ -562,5 +563,301 @@ class TestHardening:
             output, ec = sb.run("echo ok")
             assert ec == 0
             assert "ok" in output
+        finally:
+            sb.delete()
+
+
+def _requires_landlock():
+    if _landlock_abi_version() == 0:
+        pytest.skip("Landlock not available (kernel < 5.13)")
+
+
+# ------------------------------------------------------------------ #
+#  Landlock tests (root mode)                                          #
+# ------------------------------------------------------------------ #
+
+
+class TestLandlockRootful:
+    """Verify Landlock path/port restrictions in rootful mode."""
+
+    def test_writable_paths(self, tmp_path, shared_cache_dir):
+        """Only listed paths should be writable."""
+        _requires_root()
+        _requires_docker()
+        _requires_landlock()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            writable_paths=["/workspace"],
+        )
+        sb = Sandbox(config, name="ll-write")
+        try:
+            # /workspace should be writable
+            output, ec = sb.run("echo ok > /workspace/test.txt && cat /workspace/test.txt")
+            assert ec == 0
+            assert "ok" in output
+            # /root should NOT be writable (not in writable_paths)
+            _, ec = sb.run("touch /root/test.txt 2>/dev/null")
+            assert ec != 0, "write to /root should fail with Landlock"
+            # /tmp is auto-added as writable
+            output, ec = sb.run("echo tmp_ok > /tmp/test_ll.txt && cat /tmp/test_ll.txt")
+            assert ec == 0
+            assert "tmp_ok" in output
+        finally:
+            sb.delete()
+
+    def test_writable_paths_reads_unrestricted(self, tmp_path, shared_cache_dir):
+        """When only writable_paths is set, reads should be unrestricted."""
+        _requires_root()
+        _requires_docker()
+        _requires_landlock()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            writable_paths=["/workspace"],
+        )
+        sb = Sandbox(config, name="ll-read-ok")
+        try:
+            # Should be able to read anywhere (reads not restricted)
+            output, ec = sb.run("ls /usr/bin/ | head -1")
+            assert ec == 0
+            assert output.strip()
+        finally:
+            sb.delete()
+
+    def test_readable_paths(self, tmp_path, shared_cache_dir):
+        """Only listed paths should be readable when readable_paths is set."""
+        _requires_root()
+        _requires_docker()
+        _requires_landlock()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            readable_paths=["/workspace", "/usr", "/lib", "/lib64",
+                            "/bin", "/sbin", "/etc"],
+        )
+        sb = Sandbox(config, name="ll-read")
+        try:
+            # /workspace should be readable
+            sb.run("echo test > /workspace/data.txt")
+            output, ec = sb.run("cat /workspace/data.txt")
+            assert ec == 0
+            assert "test" in output
+            # /var should NOT be readable (not in readable_paths)
+            _, ec = sb.run("ls /var 2>/dev/null")
+            assert ec != 0, "read of /var should fail with Landlock"
+        finally:
+            sb.delete()
+
+    def test_writable_and_readable_paths(self, tmp_path, shared_cache_dir):
+        """Both read and write restrictions should work together."""
+        _requires_root()
+        _requires_docker()
+        _requires_landlock()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            writable_paths=["/workspace"],
+            readable_paths=["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"],
+        )
+        sb = Sandbox(config, name="ll-rw")
+        try:
+            # /workspace writable
+            output, ec = sb.run("echo rw_ok > /workspace/x.txt && cat /workspace/x.txt")
+            assert ec == 0
+            assert "rw_ok" in output
+            # /usr readable
+            output, ec = sb.run("ls /usr/bin/ | head -1")
+            assert ec == 0
+            # /var not readable
+            _, ec = sb.run("ls /var 2>/dev/null")
+            assert ec != 0
+            # /usr not writable
+            _, ec = sb.run("touch /usr/test 2>/dev/null")
+            assert ec != 0
+        finally:
+            sb.delete()
+
+    def test_writable_paths_after_reset(self, tmp_path, shared_cache_dir):
+        """Landlock should still be enforced after sandbox reset."""
+        _requires_root()
+        _requires_docker()
+        _requires_landlock()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            writable_paths=["/workspace"],
+        )
+        sb = Sandbox(config, name="ll-reset")
+        try:
+            # Before reset
+            _, ec = sb.run("touch /root/test 2>/dev/null")
+            assert ec != 0
+            sb.reset()
+            # After reset — Landlock should still be active
+            _, ec = sb.run("touch /root/test 2>/dev/null")
+            assert ec != 0, "Landlock should survive reset"
+            # /workspace still writable
+            output, ec = sb.run("echo post_reset > /workspace/y.txt && cat /workspace/y.txt")
+            assert ec == 0
+            assert "post_reset" in output
+        finally:
+            sb.delete()
+
+    def test_allowed_ports(self, tmp_path, shared_cache_dir):
+        """Only listed TCP ports should be connectable."""
+        _requires_root()
+        _requires_docker()
+        _requires_landlock()
+        abi = _landlock_abi_version()
+        if abi < 4:
+            pytest.skip("Landlock net port rules require ABI v4+ (kernel 6.7+)")
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            allowed_ports=[80, 443],
+        )
+        sb = Sandbox(config, name="ll-port")
+        try:
+            # Attempt connection to port 9999 (not allowed) — should fail
+            # Use bash /dev/tcp which uses connect(2)
+            _, ec = sb.run("bash -c 'echo > /dev/tcp/127.0.0.1/9999' 2>/dev/null", timeout=3)
+            assert ec != 0, "connect to port 9999 should fail with Landlock"
+        finally:
+            sb.delete()
+
+    def test_no_landlock_params_no_restriction(self, root_sandbox):
+        """Without Landlock params, no filesystem restrictions should apply."""
+        _requires_landlock()
+        # Normal sandbox should have no Landlock restrictions
+        output, ec = root_sandbox.run("touch /root/test_no_ll && rm /root/test_no_ll && echo ok")
+        assert ec == 0
+        assert "ok" in output
+
+    def test_landlock_feature_flag(self, tmp_path, shared_cache_dir):
+        """features dict should reflect Landlock status."""
+        _requires_root()
+        _requires_docker()
+        _requires_landlock()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            writable_paths=["/workspace"],
+        )
+        sb = Sandbox(config, name="ll-feat")
+        try:
+            assert sb.features.get("landlock") is True
+        finally:
+            sb.delete()
+
+    def test_landlock_unavailable_raises(self):
+        """Setting Landlock params on unsupported kernel should raise RuntimeError."""
+        from unittest.mock import patch
+        from agentdocker_lite.backends.base import SandboxBase
+        config = SandboxConfig(image=TEST_IMAGE, writable_paths=["/workspace"])
+        with patch("agentdocker_lite.security._landlock_abi_version", return_value=0):
+            with pytest.raises(RuntimeError, match="Landlock not available"):
+                SandboxBase._build_landlock_config(config)
+
+    def test_allowed_ports_low_abi_raises(self):
+        """allowed_ports on ABI < 4 should raise RuntimeError."""
+        from unittest.mock import patch
+        from agentdocker_lite.backends.base import SandboxBase
+        config = SandboxConfig(image=TEST_IMAGE, allowed_ports=[80])
+        with patch("agentdocker_lite.security._landlock_abi_version", return_value=3):
+            with pytest.raises(RuntimeError, match="ABI v4"):
+                SandboxBase._build_landlock_config(config)
+
+
+# ------------------------------------------------------------------ #
+#  Landlock tests (rootless / userns mode)                             #
+# ------------------------------------------------------------------ #
+
+
+class TestLandlockRootless:
+    """Verify Landlock in rootless (user namespace) mode."""
+
+    def test_writable_paths_rootless(self, tmp_path, shared_cache_dir):
+        """writable_paths should restrict writes in rootless mode."""
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        _requires_docker()
+        _requires_landlock()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            writable_paths=["/workspace"],
+        )
+        sb = Sandbox(config, name="ll-userns-write")
+        try:
+            # /workspace writable
+            output, ec = sb.run("echo ok > /workspace/test.txt && cat /workspace/test.txt")
+            assert ec == 0
+            assert "ok" in output
+            # /root not writable
+            _, ec = sb.run("touch /root/test.txt 2>/dev/null")
+            assert ec != 0
+        finally:
+            sb.delete()
+
+    def test_readable_paths_rootless(self, tmp_path, shared_cache_dir):
+        """readable_paths should restrict reads in rootless mode."""
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        _requires_docker()
+        _requires_landlock()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            readable_paths=["/workspace", "/usr", "/lib", "/lib64",
+                            "/bin", "/sbin", "/etc"],
+        )
+        sb = Sandbox(config, name="ll-userns-read")
+        try:
+            output, ec = sb.run("ls /usr/bin/ | head -1")
+            assert ec == 0
+            _, ec = sb.run("ls /var 2>/dev/null")
+            assert ec != 0
+        finally:
+            sb.delete()
+
+    def test_writable_paths_after_reset_rootless(self, tmp_path, shared_cache_dir):
+        """Landlock should survive reset in rootless mode."""
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        _requires_docker()
+        _requires_landlock()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+            writable_paths=["/workspace"],
+        )
+        sb = Sandbox(config, name="ll-userns-reset")
+        try:
+            _, ec = sb.run("touch /root/test 2>/dev/null")
+            assert ec != 0
+            sb.reset()
+            _, ec = sb.run("touch /root/test 2>/dev/null")
+            assert ec != 0, "Landlock should survive reset"
         finally:
             sb.delete()

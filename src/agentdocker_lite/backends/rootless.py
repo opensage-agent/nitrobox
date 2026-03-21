@@ -178,6 +178,13 @@ class RootlessSandbox(RootfulSandbox):
                     shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
                     (tmp_dir / ".adl_seccomp").chmod(0o755)
 
+        # --- Landlock config in upper dir ---------------------------------
+        ll_config = self._build_landlock_config(config)
+        if ll_config:
+            tmp_dir = self._upper_dir / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            (tmp_dir / ".adl_landlock").write_text(ll_config)
+
         # --- DNS ----------------------------------------------------------
         if config.dns:
             self._write_dns(config.dns)
@@ -234,6 +241,7 @@ class RootlessSandbox(RootfulSandbox):
             "whiteout": whiteout_strategy,
             "pidfd": self._persistent_shell._pidfd is not None,
             "seccomp": config.seccomp,
+            "landlock": ll_config is not None,
             "netns": config.net_isolate,
             "mask_paths": True,
             "cap_drop": True,

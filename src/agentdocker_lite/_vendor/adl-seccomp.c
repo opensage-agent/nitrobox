@@ -51,6 +51,11 @@ static long sc6(long nr, long a, long b, long c, long d, long e, long f) {
 #define NR_execve  59
 #define NR_exit    60
 
+/* Landlock syscall numbers (same on x86_64 and aarch64) */
+#define NR_landlock_create_ruleset 444
+#define NR_landlock_add_rule       445
+#define NR_landlock_restrict_self  446
+
 /* Constants */
 #define MS_RDONLY  1
 #define MS_NOSUID  2
@@ -65,11 +70,70 @@ static long sc6(long nr, long a, long b, long c, long d, long e, long f) {
 #define PR_SET_SECCOMP      22
 #define SECCOMP_MODE_FILTER 2
 
+#define O_PATH    010000000
+#define O_CLOEXEC 02000000
+
+/* Landlock constants */
+#define LL_CREATE_RULESET_VERSION (1 << 0)
+
+/* FS access flags */
+#define LL_FS_EXECUTE       (1ULL << 0)
+#define LL_FS_WRITE_FILE    (1ULL << 1)
+#define LL_FS_READ_FILE     (1ULL << 2)
+#define LL_FS_READ_DIR      (1ULL << 3)
+#define LL_FS_REMOVE_DIR    (1ULL << 4)
+#define LL_FS_REMOVE_FILE   (1ULL << 5)
+#define LL_FS_MAKE_CHAR     (1ULL << 6)
+#define LL_FS_MAKE_DIR      (1ULL << 7)
+#define LL_FS_MAKE_REG      (1ULL << 8)
+#define LL_FS_MAKE_SOCK     (1ULL << 9)
+#define LL_FS_MAKE_FIFO     (1ULL << 10)
+#define LL_FS_MAKE_BLOCK    (1ULL << 11)
+#define LL_FS_MAKE_SYM      (1ULL << 12)
+#define LL_FS_REFER         (1ULL << 13)  /* ABI v2 */
+#define LL_FS_TRUNCATE      (1ULL << 14)  /* ABI v3 */
+#define LL_FS_IOCTL_DEV     (1ULL << 15)  /* ABI v5 */
+
+/* Net access flags (ABI v4+) */
+#define LL_NET_CONNECT_TCP  (1ULL << 1)
+
+/* Scope flags (ABI v6+) */
+#define LL_SCOPE_UNIX       (1ULL << 0)
+#define LL_SCOPE_SIGNAL     (1ULL << 1)
+
+/* Rule types */
+#define LL_RULE_PATH_BENEATH 1
+#define LL_RULE_NET_PORT     2
+
+/* Composite masks */
+#define LL_FS_READ (LL_FS_EXECUTE | LL_FS_READ_FILE | LL_FS_READ_DIR)
+#define LL_FS_WRITE_V1 ( \
+    LL_FS_WRITE_FILE | LL_FS_REMOVE_DIR | LL_FS_REMOVE_FILE | \
+    LL_FS_MAKE_CHAR | LL_FS_MAKE_DIR | LL_FS_MAKE_REG | \
+    LL_FS_MAKE_SOCK | LL_FS_MAKE_FIFO | LL_FS_MAKE_BLOCK | LL_FS_MAKE_SYM)
+
 /* Minimal stat (only need st_mode at offset 24 on x86_64) */
 struct kstat { char pad[24]; unsigned int st_mode; char rest[120]; };
 
 /* BPF filter header */
 struct bpf_prog { unsigned short len; void *filter; };
+
+/* Landlock structs (match kernel UAPI layout) */
+struct ll_ruleset_attr {
+    unsigned long long handled_access_fs;
+    unsigned long long handled_access_net;
+    unsigned long long scoped;
+};
+
+struct ll_path_beneath {
+    unsigned long long allowed_access;
+    int parent_fd;
+} __attribute__((packed));
+
+struct ll_net_port {
+    unsigned long long allowed_access;
+    unsigned long long port;
+};
 
 /* ---- Helpers ---- */
 
@@ -89,6 +153,116 @@ static const char *ro_paths[] = {
 };
 
 static int keep(int c) { for(int i=0;keep_caps[i]>=0;i++) if(keep_caps[i]==c) return 1; return 0; }
+
+/* ---- Landlock ---- */
+
+static void apply_landlock(void) {
+    /* Check if config file exists */
+    struct kstat st;
+    if (sc2(NR_stat, (long)"/tmp/.adl_landlock", (long)&st) != 0)
+        return;
+
+    /* Read config into stack buffer */
+    int fd = sc2(NR_open, (long)"/tmp/.adl_landlock", 0/*O_RDONLY*/);
+    if (fd < 0) return;
+
+    char buf[4096];
+    long n = sc3(NR_read, fd, (long)buf, sizeof(buf) - 1);
+    sc1(NR_close, fd);
+    sc1(NR_unlink, (long)"/tmp/.adl_landlock");
+    if (n <= 0) return;
+    buf[n] = 0;
+
+    /* Query Landlock ABI version */
+    long abi = sc3(NR_landlock_create_ruleset, 0, 0, LL_CREATE_RULESET_VERSION);
+    if (abi <= 0) return;  /* Landlock not available — skip silently */
+
+    /* Parse mode flags from first line */
+    int mode_r = 0, mode_w = 0, mode_p = 0;
+    int i = 0;
+    while (i < n && buf[i] != '\n') {
+        if (buf[i] == 'r') mode_r = 1;
+        else if (buf[i] == 'w') mode_w = 1;
+        else if (buf[i] == 'p') mode_p = 1;
+        i++;
+    }
+    if (i < n) i++;  /* skip newline */
+    if (!mode_r && !mode_w && !mode_p) return;
+
+    /* Build write mask adjusted for ABI version */
+    unsigned long long fs_write = LL_FS_WRITE_V1;
+    if (abi >= 2) fs_write |= LL_FS_REFER;
+    if (abi >= 3) fs_write |= LL_FS_TRUNCATE;
+    if (abi >= 5) fs_write |= LL_FS_IOCTL_DEV;
+
+    /* Compute handled_access masks */
+    unsigned long long handled_fs = 0;
+    if (mode_r) handled_fs |= LL_FS_READ;
+    if (mode_w) handled_fs |= fs_write;
+
+    unsigned long long handled_net = 0;
+    if (mode_p && abi >= 4) handled_net = LL_NET_CONNECT_TCP;
+
+    unsigned long long scoped = 0;
+    if (abi >= 6) scoped = LL_SCOPE_UNIX | LL_SCOPE_SIGNAL;
+
+    /* Create ruleset */
+    struct ll_ruleset_attr attr = { handled_fs, handled_net, scoped };
+    long rs = sc3(NR_landlock_create_ruleset, (long)&attr, sizeof(attr), 0);
+    if (rs < 0) return;
+
+    /* Rule access masks: R grants read, W grants all handled FS access */
+    unsigned long long r_access = handled_fs & LL_FS_READ;
+    unsigned long long w_access = handled_fs;
+
+    /* Parse and add rules line by line */
+    while (i < n) {
+        char type = buf[i];
+        /* Skip invalid lines */
+        if ((type != 'R' && type != 'W' && type != 'P') ||
+            i + 1 >= n || buf[i + 1] != ' ') {
+            while (i < n && buf[i] != '\n') i++;
+            i++;
+            continue;
+        }
+        i += 2;  /* skip "X " prefix */
+
+        /* Extract value (path or port number) */
+        int start = i;
+        while (i < n && buf[i] != '\n') i++;
+        buf[i] = 0;  /* null-terminate value */
+
+        if ((type == 'R' || type == 'W') && buf[start]) {
+            unsigned long long access = (type == 'W') ? w_access : r_access;
+            if (access == 0) { i++; continue; }
+
+            /* Open path with O_PATH for Landlock rule */
+            long pfd = sc2(NR_open, (long)&buf[start], O_PATH | O_CLOEXEC);
+            if (pfd >= 0) {
+                struct ll_path_beneath rule = { access, (int)pfd };
+                sc5(NR_landlock_add_rule, rs, LL_RULE_PATH_BENEATH,
+                    (long)&rule, 0, 0);
+                sc1(NR_close, pfd);
+            }
+        } else if (type == 'P' && abi >= 4) {
+            /* Parse port number */
+            unsigned long long port = 0;
+            for (int j = start; buf[j] >= '0' && buf[j] <= '9'; j++)
+                port = port * 10 + (buf[j] - '0');
+            if (port > 0 && port <= 65535) {
+                struct ll_net_port rule = { LL_NET_CONNECT_TCP, port };
+                sc5(NR_landlock_add_rule, rs, LL_RULE_NET_PORT,
+                    (long)&rule, 0, 0);
+            }
+        }
+        i++;  /* advance past null terminator */
+    }
+
+    /* Enforce: NO_NEW_PRIVS required before restrict_self */
+    sc5(NR_prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+    sc2(NR_landlock_restrict_self, rs, 0);
+    sc1(NR_close, rs);
+}
 
 /* ---- Entry point ---- */
 
@@ -159,25 +333,30 @@ static void _main(long argc, char **argv, char **envp) {
         }
     }
 
-    /* 6. Seccomp BPF from /tmp/.adl_seccomp.bpf */
-    int fd = sc2(NR_open, (long)"/tmp/.adl_seccomp.bpf", 0/*O_RDONLY*/);
-    if (fd >= 0) {
-        long sz = sc3(NR_lseek, fd, 0, 2/*SEEK_END*/);
-        sc3(NR_lseek, fd, 0, 0/*SEEK_SET*/);
-        if (sz > 0) {
-            void *buf = (void*)sc6(NR_mmap, 0, sz, 1/*PROT_READ*/, 2/*MAP_PRIVATE*/, fd, 0/*offset*/);
-            if ((long)buf > 0) {
-                struct bpf_prog p = { sz/8, buf };
-                sc5(NR_prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
-                sc3(NR_prctl, PR_SET_SECCOMP, SECCOMP_MODE_FILTER, (long)&p);
-                sc2(NR_munmap, (long)buf, sz);
+    /* 6. Landlock path/port restrictions (before seccomp blocks the syscalls) */
+    apply_landlock();
+
+    /* 7. Seccomp BPF from /tmp/.adl_seccomp.bpf */
+    {
+        int fd = sc2(NR_open, (long)"/tmp/.adl_seccomp.bpf", 0/*O_RDONLY*/);
+        if (fd >= 0) {
+            long sz = sc3(NR_lseek, fd, 0, 2/*SEEK_END*/);
+            sc3(NR_lseek, fd, 0, 0/*SEEK_SET*/);
+            if (sz > 0) {
+                void *buf = (void*)sc6(NR_mmap, 0, sz, 1/*PROT_READ*/, 2/*MAP_PRIVATE*/, fd, 0/*offset*/);
+                if ((long)buf > 0) {
+                    struct bpf_prog p = { sz/8, buf };
+                    sc5(NR_prctl, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
+                    sc3(NR_prctl, PR_SET_SECCOMP, SECCOMP_MODE_FILTER, (long)&p);
+                    sc2(NR_munmap, (long)buf, sz);
+                }
             }
+            sc1(NR_close, fd);
+            sc1(NR_unlink, (long)"/tmp/.adl_seccomp.bpf");
         }
-        sc1(NR_close, fd);
-        sc1(NR_unlink, (long)"/tmp/.adl_seccomp.bpf");
     }
 
-    /* 6. exec target */
+    /* 8. exec target */
     sc3(NR_execve, (long)argv[1], (long)(argv+1), (long)envp);
     writes("adl-seccomp: exec failed\n");
     sc1(NR_exit, 127);
