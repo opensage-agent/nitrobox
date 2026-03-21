@@ -934,7 +934,9 @@ class TestPortMap:
             sb.run_background("python3 -m http.server 8000 --directory /tmp")
             time.sleep(2)
 
-            # Must use 127.0.0.1 (not localhost) — pasta listens on IPv4 only
+            # Use 127.0.0.1: pasta accepts IPv6 connections but can't
+            # forward them to an IPv4-only server (known pasta bug,
+            # https://bugs.passt.top/show_bug.cgi?id=131)
             resp = urllib.request.urlopen("http://127.0.0.1:19876/", timeout=5)
             assert resp.status == 200
         finally:
