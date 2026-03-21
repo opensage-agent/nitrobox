@@ -1101,10 +1101,14 @@ class RootfulSandbox(SandboxBase):
     def _start_pasta(self) -> None:
         """Start pasta for NAT'd networking with port mapping.
 
-        Bind-mounts the sandbox's network namespace to ``/run/netns/``
-        and passes ``--netns <name>`` to pasta (mirroring Podman's
-        approach).  This avoids the ``/proc/PID/ns/user`` permission
-        issue when pasta drops privileges.
+        Mirrors Podman's pasta invocation (containers/common
+        ``libnetwork/pasta/pasta_linux.go``):
+
+        1. Bind-mount sandbox netns to ``/run/netns/adl-<name>``
+        2. Invoke pasta with ``--config-net``, explicit port mappings,
+           and ``--netns <path>`` (never a raw PID)
+        3. Disable all automatic port forwarding (``-t none`` etc.)
+        4. Let pasta daemonize (no ``-f``)
         """
         port_map = self._config.port_map
         if not port_map:
@@ -1113,7 +1117,7 @@ class RootfulSandbox(SandboxBase):
             logger.warning("port_map requires net_isolate=True; ignoring port_map")
             return
 
-        # Find pasta binary
+        # --- find pasta binary ------------------------------------------------
         vendored = Path(__file__).parent.parent / "_vendor" / "pasta"
         if vendored.exists() and vendored.is_file():
             pasta_bin = str(vendored)
@@ -1125,47 +1129,61 @@ class RootfulSandbox(SandboxBase):
                 "Install: pacman -S passt / apt install passt"
             )
 
+        # --- bind-mount netns -------------------------------------------------
         shell_pid = self._persistent_shell._process.pid
-
-        # Bind-mount netns to /run/netns/ so pasta can access it
-        # without needing ptrace-level permissions on /proc/PID/ns/*
         netns_name = f"adl-{self._name}"
         netns_path = f"/run/netns/{netns_name}"
         os.makedirs("/run/netns", exist_ok=True)
-        # Clean up stale bind mount from a previous run
         if os.path.exists(netns_path):
             subprocess.run(["umount", "-l", netns_path], capture_output=True)
             try:
                 os.unlink(netns_path)
             except OSError:
                 pass
-        open(netns_path, "w").close()
+        # Create file readable by nobody (pasta drops privileges)
+        fd = os.open(netns_path, os.O_WRONLY | os.O_CREAT, 0o644)
+        os.close(fd)
         subprocess.run(
             ["mount", "--bind", f"/proc/{shell_pid}/ns/net", netns_path],
             capture_output=True, check=True,
         )
         self._netns_path = netns_path
 
-        cmd: list[str] = [
-            pasta_bin, "--config-net", "-q", "--runas", "0:0",
-            "-f",  # foreground — keep pasta alive as a child process
-        ]
-        for mapping in port_map:
-            cmd.extend(["-t", mapping])
-        cmd.extend(["--netns", netns_name])
+        # --- build pasta args (following Podman's createPastaArgs) ------------
+        # Podman uses pasta in rootless mode where no privilege drop is needed.
+        # We run as root, so pasta would drop to nobody and lose CAP_SYS_ADMIN
+        # for setns().  --runas 0:0 keeps root (safe: pasta runs in our netns).
+        cmd: list[str] = [pasta_bin, "--config-net", "--runas", "0:0"]
 
-        self._pasta_process = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        # Give pasta time to configure the network interface
-        time.sleep(0.2)
-        if self._pasta_process.poll() is not None:
+        # Explicit port mappings
+        has_tcp = False
+        for mapping in port_map:
+            # "8080:80" → -t 8080:80 (TCP by default)
+            cmd.extend(["-t", mapping])
+            has_tcp = True
+
+        # Disable all automatic port forwarding (Podman default)
+        if not has_tcp:
+            cmd.extend(["-t", "none"])
+        cmd.extend(["-u", "none"])   # no auto UDP
+        cmd.extend(["-T", "none"])   # no TCP from namespace to init
+        cmd.extend(["-U", "none"])   # no UDP from namespace to init
+
+        cmd.extend(["--dns-forward", "169.254.1.1"])
+        cmd.append("--no-map-gw")
+        cmd.append("--quiet")
+        cmd.extend(["--netns", netns_path])
+        cmd.extend(["--map-guest-addr", "169.254.1.2"])
+
+        # --- run pasta (daemonizes by default) --------------------------------
+        out = subprocess.run(cmd, capture_output=True, text=True)
+        if out.returncode != 0:
             raise RuntimeError(
-                f"pasta exited immediately (exit={self._pasta_process.returncode})"
+                f"pasta failed (exit={out.returncode}): {out.stderr.strip()}"
             )
 
         # Bring up loopback inside the sandbox (pasta --config-net
-        # sets up the pasta interface but doesn't touch lo)
+        # configures the pasta interface but doesn't touch lo)
         self._persistent_shell.execute(
             "ip link set lo up 2>/dev/null || "
             "python3 -c '"
@@ -1178,31 +1196,30 @@ class RootfulSandbox(SandboxBase):
             timeout=5,
         )
 
-        logger.debug(
-            "pasta started: pid=%d, netns=%s, ports=%s",
-            self._pasta_process.pid, netns_name, port_map,
-        )
+        logger.debug("pasta ready: netns=%s, ports=%s", netns_name, port_map)
 
     def _stop_pasta(self) -> None:
-        """Stop pasta and clean up the bind-mounted netns."""
-        proc = getattr(self, "_pasta_process", None)
-        if proc and proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except Exception:
-                proc.kill()
-                proc.wait(timeout=2)
-        self._pasta_process = None
+        """Clean up pasta and the bind-mounted netns.
 
+        pasta daemonizes and should exit when the netns is destroyed.
+        We also kill any remaining pasta process bound to our netns.
+        """
         netns_path = getattr(self, "_netns_path", None)
-        if netns_path and os.path.exists(netns_path):
-            subprocess.run(["umount", netns_path], capture_output=True)
-            try:
-                os.unlink(netns_path)
-            except OSError:
-                pass
+        if netns_path:
+            # Kill any pasta process using our netns (daemonized PID differs
+            # from the original Popen PID due to fork)
+            subprocess.run(
+                ["fuser", "-k", netns_path],
+                capture_output=True,
+            )
+            if os.path.exists(netns_path):
+                subprocess.run(["umount", netns_path], capture_output=True)
+                try:
+                    os.unlink(netns_path)
+                except OSError:
+                    pass
             self._netns_path = None
+        self._pasta_process = None
 
     # ------------------------------------------------------------------ #
     #  Internal helpers                                                    #
