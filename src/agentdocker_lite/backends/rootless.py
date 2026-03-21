@@ -194,6 +194,10 @@ class RootlessSandbox(RootfulSandbox):
         subuid_range = self._detect_subuid_range()
 
         # --- start persistent shell ---------------------------------------
+        # In rootless mode with port_map, DON'T pass net_isolate to unshare.
+        # The setup script handles network isolation + pasta internally
+        # (pasta needs to run inside the userns for CAP_SYS_ADMIN).
+        shell_net_isolate = config.net_isolate and not config.port_map
         t0 = time.monotonic()
         self._persistent_shell = _PersistentShell(
             rootfs=self._rootfs,
@@ -201,7 +205,7 @@ class RootlessSandbox(RootfulSandbox):
             env=self._cached_env,
             working_dir=config.working_dir or "/",
             tty=config.tty,
-            net_isolate=config.net_isolate,
+            net_isolate=shell_net_isolate,
             seccomp=config.seccomp,
             userns_setup_script=str(setup_script_path),
             systemd_scope_properties=self._systemd_scope_properties or None,
@@ -212,7 +216,7 @@ class RootlessSandbox(RootfulSandbox):
 
         self._bg_handles: dict[str, str] = {}
         self._pasta_process = None
-        self._start_pasta()
+        # Rootless pasta is started from inside the setup script (not here)
 
         if config.oom_score_adj is not None:
             self._apply_oom_score_adj(config.oom_score_adj)
@@ -340,13 +344,49 @@ class RootlessSandbox(RootfulSandbox):
                 if mode == "ro":
                     lines.append(f"mount -o remount,ro,bind {target}")
 
-        # Enter chroot.
-        # In userns mode, skip adl-seccomp: it re-mounts /dev as empty tmpfs
-        # and uses mknod (which fails in userns), breaking /dev/null etc.
-        # The setup script above already mounted /proc, /dev (with bind-mount
-        # devices), and volumes correctly.
-        # TODO: apply seccomp BPF + cap drop via Python security.py in userns
-        lines.extend(["", f"exec chroot {merged} {shell}{norc}"])
+        # --- Network isolation + pasta (rootless) ---
+        # When port_map is set, unshare did NOT create a net namespace.
+        # We handle it here (inside userns where we have CAP_SYS_ADMIN):
+        # 1. Create a new netns via unshare --net, bind-mount it
+        # 2. Run pasta (still in host netns, can bind host ports)
+        # 3. nsenter --net into the new netns for chroot
+        port_map = self._config.port_map
+        chroot_cmd = f"exec chroot {merged} {shell}{norc}"
+
+        if port_map:
+            vendored = Path(__file__).parent.parent / "_vendor" / "pasta"
+            pasta_bin = str(vendored) if vendored.exists() else shutil.which("pasta") or ""
+
+            if pasta_bin:
+                netns_file = self._env_dir / ".netns"
+                pasta_args = f"{pasta_bin} --config-net"
+                if not self._config.ipv6:
+                    pasta_args += " --ipv4-only"
+                for mapping in port_map:
+                    pasta_args += f" -t {mapping}"
+                pasta_args += (
+                    " -u none -T none -U none"
+                    " --dns-forward 169.254.1.1 --no-map-gw --quiet"
+                    f" --netns {netns_file}"
+                    " --map-guest-addr 169.254.1.2"
+                )
+                lines.extend([
+                    "",
+                    "# Create network namespace (inside userns for CAP_SYS_ADMIN)",
+                    f"touch {netns_file}",
+                    f"unshare --net mount --bind /proc/self/ns/net {netns_file}",
+                    "",
+                    "# Start pasta (in host netns, can bind host ports)",
+                    pasta_args,
+                    "",
+                    "# Enter netns, bring up lo, then chroot",
+                    f"exec nsenter --net={netns_file} bash -c "
+                    f"'ip link set lo up 2>/dev/null; {chroot_cmd}'",
+                ])
+            else:
+                lines.extend(["", chroot_cmd])
+        else:
+            lines.extend(["", chroot_cmd])
 
         script_path = self._env_dir / "setup.sh"
         script_path.write_text("\n".join(lines) + "\n")

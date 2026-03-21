@@ -891,31 +891,39 @@ class RootfulSandbox(SandboxBase):
                 "Install: pacman -S passt / apt install passt"
             )
 
-        # --- bind-mount netns -------------------------------------------------
+        # --- resolve netns path -----------------------------------------------
         shell_pid = self._persistent_shell._process.pid
         netns_name = f"adl-{self._name}"
-        netns_path = f"/run/netns/{netns_name}"
-        os.makedirs("/run/netns", exist_ok=True)
-        if os.path.exists(netns_path):
-            subprocess.run(["umount", "-l", netns_path], capture_output=True)
-            try:
-                os.unlink(netns_path)
-            except OSError:
-                pass
-        # Create file readable by nobody (pasta drops privileges)
-        fd = os.open(netns_path, os.O_WRONLY | os.O_CREAT, 0o644)
-        os.close(fd)
-        subprocess.run(
-            ["mount", "--bind", f"/proc/{shell_pid}/ns/net", netns_path],
-            capture_output=True, check=True,
-        )
-        self._netns_path = netns_path
+
+        if os.geteuid() == 0:
+            # Root: bind-mount netns to /run/netns/ (persistent, survives PID exit)
+            netns_path = f"/run/netns/{netns_name}"
+            os.makedirs("/run/netns", exist_ok=True)
+            if os.path.exists(netns_path):
+                subprocess.run(["umount", "-l", netns_path], capture_output=True)
+                try:
+                    os.unlink(netns_path)
+                except OSError:
+                    pass
+            fd = os.open(netns_path, os.O_WRONLY | os.O_CREAT, 0o644)
+            os.close(fd)
+            subprocess.run(
+                ["mount", "--bind", f"/proc/{shell_pid}/ns/net", netns_path],
+                capture_output=True, check=True,
+            )
+            self._netns_path = netns_path
+        else:
+            # Rootless: /run/netns/ requires root; use /proc path directly.
+            # pasta --runas is not needed (already unprivileged).
+            netns_path = f"/proc/{shell_pid}/ns/net"
+            self._netns_path = None  # no bind mount to clean up
 
         # --- build pasta args (following Podman's createPastaArgs) ------------
-        # Podman uses pasta in rootless mode where no privilege drop is needed.
-        # We run as root, so pasta would drop to nobody and lose CAP_SYS_ADMIN
-        # for setns().  --runas 0:0 keeps root (safe: pasta runs in our netns).
-        cmd: list[str] = [pasta_bin, "--config-net", "--runas", "0:0"]
+        cmd: list[str] = [pasta_bin, "--config-net"]
+        if os.geteuid() == 0:
+            # Root: pasta drops to nobody by default, losing CAP_SYS_ADMIN
+            # for setns(). --runas 0:0 keeps root (safe: runs in our netns).
+            cmd.extend(["--runas", "0:0"])
         if not self._config.ipv6:
             cmd.append("--ipv4-only")
 
