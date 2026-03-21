@@ -560,6 +560,12 @@ class RootfulSandbox(SandboxBase):
                     if helper_src.exists():
                         shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
                         (tmp_dir / ".adl_seccomp").chmod(0o755)
+
+            # Re-create read_only marker (cleared by upper dir wipe)
+            if self._config.read_only and self._config.seccomp:
+                marker = self._upper_dir / "tmp" / ".adl_readonly"
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.touch()
         else:
             self._unmount_binds()
             if self._fs_backend == "btrfs":
@@ -570,6 +576,24 @@ class RootfulSandbox(SandboxBase):
             if self._config.working_dir and self._config.working_dir != "/":
                 wd = self._rootfs / self._config.working_dir.lstrip("/")
                 wd.mkdir(parents=True, exist_ok=True)
+
+            # Re-write seccomp + read_only marker after overlayfs reset
+            if self._config.seccomp:
+                from agentdocker_lite.security import build_seccomp_bpf
+                bpf_bytes = build_seccomp_bpf()
+                if bpf_bytes:
+                    vendor_dir = Path(__file__).parent.parent / "_vendor"
+                    helper_src = vendor_dir / "adl-seccomp"
+                    if helper_src.exists():
+                        tmp_dir = self._rootfs / "tmp"
+                        tmp_dir.mkdir(parents=True, exist_ok=True)
+                        (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
+                        shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
+                        (tmp_dir / ".adl_seccomp").chmod(0o755)
+            if self._config.read_only and self._config.seccomp:
+                marker = self._rootfs / "tmp" / ".adl_readonly"
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.touch()
 
         self._persistent_shell.start()
         self._start_pasta()

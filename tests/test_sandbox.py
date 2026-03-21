@@ -1143,6 +1143,27 @@ class TestReadOnly:
         finally:
             sb.delete()
 
+    def test_read_only_survives_reset(self, tmp_path):
+        """read_only is preserved after reset()."""
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/",
+            read_only=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=str(tmp_path / "cache"),
+        )
+        sb = Sandbox(config, name="ro-reset")
+        try:
+            _, ec = sb.run("touch /test_file 2>/dev/null")
+            assert ec != 0
+            sb.reset()
+            _, ec = sb.run("touch /test_file 2>/dev/null")
+            assert ec != 0
+        finally:
+            sb.delete()
+
     def test_read_only_without_seccomp(self, tmp_path):
         """read_only works even when seccomp is disabled."""
         _requires_root()
