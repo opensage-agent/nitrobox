@@ -1,6 +1,8 @@
 # Landlock 路径/端口限制实现计划
 
-## API（已加）
+**状态：已实现** ✓ （2026-03-21）
+
+## API
 
 ```python
 SandboxConfig(
@@ -10,8 +12,8 @@ SandboxConfig(
 )
 ```
 
-参数已在 `SandboxConfig` 中声明（`base.py`），但 **尚未接入执行**。
-设置了这些参数目前不会有任何效果。
+参数在 `SandboxConfig` 中声明（`base.py`），通过 `adl-seccomp` 二进制执行 Landlock 限制。
+Rootful 和 rootless 模式均支持。Reset 后 Landlock 自动重新应用。
 
 ## 实现方案
 

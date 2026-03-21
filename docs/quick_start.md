@@ -281,6 +281,22 @@ All security features are **on by default** with zero runtime overhead.
 - **Capability dropping**: all non-essential Linux capabilities dropped (keeps Docker-default 13 caps)
 - **Time namespace**: isolates monotonic/boottime clocks, ensures CRIU restore sees continuous time (kernel 5.6+)
 
+### Landlock path/port restrictions
+
+Restrict which paths the sandbox can read/write and which TCP ports it can connect to (kernel 5.13+, port rules require 6.7+):
+
+```python
+config = SandboxConfig(
+    image="ubuntu:22.04",
+    working_dir="/workspace",
+    writable_paths=["/workspace"],          # only /workspace writable (/dev, /proc, /tmp auto-added)
+    readable_paths=["/usr", "/lib", "/etc"],# only these paths readable (None=no restriction)
+    allowed_ports=[80, 443],               # only these TCP ports connectable (None=no restriction)
+)
+```
+
+Essential paths (`/dev`, `/proc`, `/tmp`, `/sys`) are automatically included. If Landlock is not available (old kernel), restrictions are silently skipped.
+
 ### Device passthrough (root only)
 
 ```python

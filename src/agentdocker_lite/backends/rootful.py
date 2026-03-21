@@ -155,6 +155,13 @@ class RootfulSandbox(SandboxBase):
                     shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
                     (tmp_dir / ".adl_seccomp").chmod(0o755)
 
+        # Landlock config file (read by adl-seccomp before seccomp BPF)
+        ll_config = self._build_landlock_config(config)
+        if ll_config:
+            tmp_dir = self._rootfs / "tmp"
+            tmp_dir.mkdir(parents=True, exist_ok=True)
+            (tmp_dir / ".adl_landlock").write_text(ll_config)
+
         # Read-only rootfs: create marker file so adl-seccomp remounts
         # / ro after mounting /proc and /dev but before seccomp blocks
         # mount(). Cannot remount here — pivot_root needs writable rootfs.
@@ -197,6 +204,7 @@ class RootfulSandbox(SandboxBase):
             "pidfd": self._persistent_shell._pidfd is not None,
             "cgroup_v2": self._cgroup_path is not None,
             "seccomp": config.seccomp,
+            "landlock": ll_config is not None,
             "netns": config.net_isolate,
             "timens": getattr(self._persistent_shell, "_timens", False),
             "cpuset_cpus": config.cpuset_cpus,
@@ -274,6 +282,13 @@ class RootfulSandbox(SandboxBase):
                         shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
                         (tmp_dir / ".adl_seccomp").chmod(0o755)
 
+            # Re-write Landlock config to upper
+            ll_config = self._build_landlock_config(self._config)
+            if ll_config:
+                tmp_dir = self._upper_dir / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                (tmp_dir / ".adl_landlock").write_text(ll_config)
+
             # Re-create read_only marker (cleared by upper dir wipe)
             if self._config.read_only and self._config.seccomp:
                 marker = self._upper_dir / "tmp" / ".adl_readonly"
@@ -307,6 +322,13 @@ class RootfulSandbox(SandboxBase):
                 marker = self._rootfs / "tmp" / ".adl_readonly"
                 marker.parent.mkdir(parents=True, exist_ok=True)
                 marker.touch()
+
+            # Re-write Landlock config after overlayfs reset
+            ll_config = self._build_landlock_config(self._config)
+            if ll_config:
+                tmp_dir = self._rootfs / "tmp"
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                (tmp_dir / ".adl_landlock").write_text(ll_config)
 
         self._persistent_shell.start()
         self._start_pasta()
