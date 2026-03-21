@@ -104,6 +104,9 @@ class SandboxConfig:
     port_map: Optional[list[str]] = None
     ipv6: bool = False  # pasta IPv4-only by default; localhost works.
     # Set True for IPv6 networking (localhost may fail — use 127.0.0.1).
+    writable_paths: Optional[list[str]] = None
+    readable_paths: Optional[list[str]] = None
+    allowed_ports: Optional[list[int]] = None
     oom_score_adj: Optional[int] = None
     cpuset_cpus: Optional[str] = None
 
