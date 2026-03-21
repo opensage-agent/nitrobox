@@ -513,16 +513,20 @@ class _PersistentShell:
         """Read a single line from the signal fd."""
         if self._signal_r is None:
             return None
-        ready, _, _ = select.select([self._signal_r], [], [], timeout)
-        if not ready:
-            return None
+        ep = select.epoll()
+        ep.register(self._signal_r, select.EPOLLIN)
         try:
+            events = ep.poll(timeout if timeout is not None else -1, maxevents=1)
+            if not events:
+                return None
             data = os.read(self._signal_r, 256)
             if not data:
                 return None
             return data.decode("utf-8", errors="replace").strip()
         except OSError:
             return None
+        finally:
+            ep.close()
 
     def _read_until_signal(
         self, timeout: Optional[float] = None
@@ -541,80 +545,80 @@ class _PersistentShell:
         parts: list[str] = []
         exit_code: Optional[int] = None
 
-        while True:
-            if deadline is not None:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return None, -2
-                wait = min(remaining, 2.0)
-            else:
-                wait = 5.0
+        ep = select.epoll()
+        ep.register(stdout_fd, select.EPOLLIN)
+        if signal_fd is not None:
+            ep.register(signal_fd, select.EPOLLIN)
 
-            fds_to_watch = [stdout_fd]
-            if signal_fd is not None:
-                fds_to_watch.append(signal_fd)
+        try:
+            while True:
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return None, -2
+                    wait = min(remaining, 2.0)
+                else:
+                    wait = 5.0
 
-            ready, _, _ = select.select(fds_to_watch, [], [], wait)
+                events = ep.poll(wait)
+                ready_fds = {fd for fd, _ in events}
 
-            # Read stdout data if available.
-            if stdout_fd in ready:
-                try:
-                    chunk = os.read(stdout_fd, 65536)
-                except OSError as e:
-                    # PTY raises EIO when slave side closes — not an error,
-                    # just means the child is gone.
-                    if e.errno == errno.EIO:
-                        break
+                # No events and process died → shell is gone.
+                if not events and self._process.poll() is not None:
+                    if buf:
+                        parts.append(buf.decode("utf-8", errors="backslashreplace"))
                     return None, -1
-                if not chunk:
-                    return None, -1
-                buf += chunk
 
-                # Decode complete lines from buffer.
-                while b"\n" in buf:
-                    line_bytes, buf = buf.split(b"\n", 1)
-                    line_str = line_bytes.decode("utf-8", errors="backslashreplace")
-                    parts.append(line_str + "\n")
-
-            # Check signal fd for exit code.
-            if signal_fd is not None and signal_fd in ready:
-                try:
-                    sig_data = os.read(signal_fd, 256)
-                except OSError:
-                    return None, -1
-                if sig_data:
-                    try:
-                        exit_code = int(
-                            sig_data.decode("utf-8", errors="replace").strip()
-                        )
-                    except ValueError:
-                        exit_code = -1
-
-            # If we got the exit code, drain any remaining stdout.
-            if exit_code is not None:
-                # Non-blocking drain of remaining stdout.
-                while True:
-                    drain_ready, _, _ = select.select([stdout_fd], [], [], 0.01)
-                    if not drain_ready:
-                        break
+                # Read stdout data if available.
+                if stdout_fd in ready_fds:
                     try:
                         chunk = os.read(stdout_fd, 65536)
-                    except OSError:
-                        break  # EIO from PTY or pipe closed
+                    except OSError as e:
+                        if e.errno == errno.EIO:
+                            break
+                        return None, -1
                     if not chunk:
-                        break
+                        return None, -1
                     buf += chunk
 
-                # Decode remaining buffer.
-                if buf:
-                    parts.append(buf.decode("utf-8", errors="backslashreplace"))
+                    while b"\n" in buf:
+                        line_bytes, buf = buf.split(b"\n", 1)
+                        line_str = line_bytes.decode("utf-8", errors="backslashreplace")
+                        parts.append(line_str + "\n")
 
-                return "".join(parts), exit_code
+                # Check signal fd for exit code.
+                if signal_fd is not None and signal_fd in ready_fds:
+                    try:
+                        sig_data = os.read(signal_fd, 256)
+                    except OSError:
+                        return None, -1
+                    if sig_data:
+                        try:
+                            exit_code = int(
+                                sig_data.decode("utf-8", errors="replace").strip()
+                            )
+                        except ValueError:
+                            exit_code = -1
 
-            if not ready and self._process.poll() is not None:
-                if buf:
-                    parts.append(buf.decode("utf-8", errors="backslashreplace"))
-                return None, -1
+                # If we got the exit code, drain any remaining stdout.
+                if exit_code is not None:
+                    while True:
+                        if not ep.poll(0.01):
+                            break
+                        try:
+                            chunk = os.read(stdout_fd, 65536)
+                        except OSError:
+                            break
+                        if not chunk:
+                            break
+                        buf += chunk
+
+                    if buf:
+                        parts.append(buf.decode("utf-8", errors="backslashreplace"))
+
+                    return "".join(parts), exit_code
+        finally:
+            ep.close()
 
         # Reached via break (e.g. PTY EIO) — return whatever we have.
         if buf:
