@@ -99,26 +99,36 @@ static void _main(long argc, char **argv, char **envp) {
         sc1(NR_exit, 1);
     }
 
-    /* 1. Mount /proc + /dev */
-    sc2(NR_mkdir, (long)"/proc", 0755);
-    sc5(NR_mount, (long)"proc", (long)"/proc", (long)"proc", 0, 0);
+    /* 1. Mount /proc + /dev (skip if marker exists — userns setup script
+     *    already handled this with bind mounts instead of mknod) */
+    {
+        struct kstat st;
+        int skip_dev = (sc2(NR_stat, (long)"/tmp/.adl_skip_dev", (long)&st) == 0);
+        if (skip_dev)
+            sc1(NR_unlink, (long)"/tmp/.adl_skip_dev");
 
-    sc2(NR_mkdir, (long)"/dev", 0755);
-    sc5(NR_mount, (long)"tmpfs", (long)"/dev", (long)"tmpfs", MS_NOSUID, (long)"mode=0755");
-    sc3(NR_mknod, (long)"/dev/null",    S_IFCHR|0666, MKDEV(1,3));
-    sc3(NR_mknod, (long)"/dev/zero",    S_IFCHR|0666, MKDEV(1,5));
-    sc3(NR_mknod, (long)"/dev/full",    S_IFCHR|0666, MKDEV(1,7));
-    sc3(NR_mknod, (long)"/dev/random",  S_IFCHR|0444, MKDEV(1,8));
-    sc3(NR_mknod, (long)"/dev/urandom", S_IFCHR|0444, MKDEV(1,9));
-    sc3(NR_mknod, (long)"/dev/tty",     S_IFCHR|0666, MKDEV(5,0));
-    sc2(NR_symlink, (long)"/proc/self/fd",   (long)"/dev/fd");
-    sc2(NR_symlink, (long)"/proc/self/fd/0", (long)"/dev/stdin");
-    sc2(NR_symlink, (long)"/proc/self/fd/1", (long)"/dev/stdout");
-    sc2(NR_symlink, (long)"/proc/self/fd/2", (long)"/dev/stderr");
-    sc2(NR_mkdir, (long)"/dev/pts", 0755);
-    sc5(NR_mount, (long)"devpts", (long)"/dev/pts", (long)"devpts", MS_NOSUID, (long)"newinstance,ptmxmode=0666");
-    sc2(NR_symlink, (long)"pts/ptmx", (long)"/dev/ptmx");
-    sc2(NR_mkdir, (long)"/dev/shm", 01777);
+        if (!skip_dev) {
+            sc2(NR_mkdir, (long)"/proc", 0755);
+            sc5(NR_mount, (long)"proc", (long)"/proc", (long)"proc", 0, 0);
+
+            sc2(NR_mkdir, (long)"/dev", 0755);
+            sc5(NR_mount, (long)"tmpfs", (long)"/dev", (long)"tmpfs", MS_NOSUID, (long)"mode=0755");
+            sc3(NR_mknod, (long)"/dev/null",    S_IFCHR|0666, MKDEV(1,3));
+            sc3(NR_mknod, (long)"/dev/zero",    S_IFCHR|0666, MKDEV(1,5));
+            sc3(NR_mknod, (long)"/dev/full",    S_IFCHR|0666, MKDEV(1,7));
+            sc3(NR_mknod, (long)"/dev/random",  S_IFCHR|0444, MKDEV(1,8));
+            sc3(NR_mknod, (long)"/dev/urandom", S_IFCHR|0444, MKDEV(1,9));
+            sc3(NR_mknod, (long)"/dev/tty",     S_IFCHR|0666, MKDEV(5,0));
+            sc2(NR_symlink, (long)"/proc/self/fd",   (long)"/dev/fd");
+            sc2(NR_symlink, (long)"/proc/self/fd/0", (long)"/dev/stdin");
+            sc2(NR_symlink, (long)"/proc/self/fd/1", (long)"/dev/stdout");
+            sc2(NR_symlink, (long)"/proc/self/fd/2", (long)"/dev/stderr");
+            sc2(NR_mkdir, (long)"/dev/pts", 0755);
+            sc5(NR_mount, (long)"devpts", (long)"/dev/pts", (long)"devpts", MS_NOSUID, (long)"newinstance,ptmxmode=0666");
+            sc2(NR_symlink, (long)"pts/ptmx", (long)"/dev/ptmx");
+            sc2(NR_mkdir, (long)"/dev/shm", 01777);
+        }
+    }
 
     /* 2. Drop capabilities */
     for (int c = 0; c <= 41; c++)

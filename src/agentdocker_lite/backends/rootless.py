@@ -169,6 +169,9 @@ class RootlessSandbox(RootfulSandbox):
                 tmp_dir = self._upper_dir / "tmp"
                 tmp_dir.mkdir(parents=True, exist_ok=True)
                 (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
+                # Marker: skip /proc+/dev mount in adl-seccomp (setup script
+                # already handles these with bind mounts instead of mknod)
+                (tmp_dir / ".adl_skip_dev").touch()
                 vendor_dir = Path(__file__).parent.parent / "_vendor"
                 helper_src = vendor_dir / "adl-seccomp"
                 if helper_src.exists():
@@ -350,8 +353,21 @@ class RootlessSandbox(RootfulSandbox):
         # 1. Create a new netns via unshare --net, bind-mount it
         # 2. Run pasta (still in host netns, can bind host ports)
         # 3. nsenter --net into the new netns for chroot
+        # Set hostname before chroot (adl-seccomp makes /proc/sys read-only)
+        if self._config.hostname:
+            import shlex as _shlex
+            hn = _shlex.quote(self._config.hostname)
+            lines.extend([
+                "",
+                "# Hostname (must be set before adl-seccomp makes /proc/sys read-only)",
+                f"echo {hn} > /proc/sys/kernel/hostname 2>/dev/null || hostname {hn} 2>/dev/null",
+            ])
+
         port_map = self._config.port_map
-        chroot_cmd = f"exec chroot {merged} {shell}{norc}"
+        # Use adl-seccomp for cap drop + mask + readonly + seccomp BPF.
+        # It skips /proc+/dev mount when .adl_skip_dev marker exists.
+        seccomp_wrap = "/tmp/.adl_seccomp " if self._config.seccomp else ""
+        chroot_cmd = f"exec chroot {merged} {seccomp_wrap}{shell}{norc}"
 
         if port_map:
             vendored = Path(__file__).parent.parent / "_vendor" / "pasta"

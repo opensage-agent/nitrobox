@@ -456,6 +456,23 @@ class TestUserNamespace:
         finally:
             sb.delete()
 
+    def test_seccomp_active(self, userns_sandbox):
+        """Seccomp BPF is active in rootless mode (via adl-seccomp with skip_dev)."""
+        output, ec = userns_sandbox.run("cat /proc/self/status | grep Seccomp")
+        assert ec == 0
+        assert "2" in output  # Seccomp: 2 = filter mode
+
+    def test_mount_blocked(self, userns_sandbox):
+        """mount(2) should be blocked by seccomp in rootless mode."""
+        _, ec = userns_sandbox.run("mount -t tmpfs tmpfs /tmp 2>/dev/null")
+        assert ec != 0
+
+    def test_masked_paths(self, userns_sandbox):
+        """Sensitive paths should be masked in rootless mode."""
+        output, ec = userns_sandbox.run("cat /proc/kcore 2>&1 | wc -c")
+        assert ec == 0
+        assert int(output.strip()) == 0
+
 
 # ------------------------------------------------------------------ #
 #  Device passthrough tests (root mode)                                #
