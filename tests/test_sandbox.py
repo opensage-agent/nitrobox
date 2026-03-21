@@ -348,7 +348,7 @@ class TestPTY:
 class TestBackground:
     def test_run_and_check(self, sandbox):
         handle = sandbox.run_background("for i in 1 2 3; do echo line$i; sleep 0.1; done")
-        time.sleep(1)
+        time.sleep(0.5)
         output, running = sandbox.check_background(handle)
         assert "line1" in output
         assert "line3" in output
@@ -938,12 +938,19 @@ class TestPortMap:
         sb = Sandbox(config, name="port-test")
         try:
             sb.run_background("python3 -m http.server 8000 --directory /tmp")
-            time.sleep(2)
 
+            # Poll until server is ready (instead of fixed sleep)
             # Use 127.0.0.1: pasta accepts IPv6 connections but can't
             # forward them to an IPv4-only server (known pasta bug,
             # https://bugs.passt.top/show_bug.cgi?id=131)
-            resp = urllib.request.urlopen("http://127.0.0.1:19876/", timeout=5)
+            for _ in range(20):
+                try:
+                    resp = urllib.request.urlopen("http://127.0.0.1:19876/", timeout=1)
+                    break
+                except OSError:
+                    time.sleep(0.1)
+            else:
+                raise AssertionError("server did not start")
             assert resp.status == 200
         finally:
             sb.delete()
@@ -965,7 +972,7 @@ class TestPortMap:
         sb = Sandbox(config, name="lo-test")
         try:
             sb.run_background("python3 -m http.server 8000 --directory /tmp")
-            time.sleep(1)
+            time.sleep(0.3)
 
             sb.write_file("/tmp/lo_check.py",
                 "import urllib.request\n"
