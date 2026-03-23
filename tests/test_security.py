@@ -202,6 +202,13 @@ class TestUserNamespace:
         assert ec == 0
         assert "ok" in output
 
+    def test_dev_devices_survive_reset(self, userns_sandbox):
+        """/dev/null, /dev/zero, /dev/random should be char devices after reset."""
+        userns_sandbox.reset()
+        for dev in ("null", "zero", "random", "urandom"):
+            output, ec = userns_sandbox.run(f"test -c /dev/{dev} && echo ok")
+            assert ec == 0 and "ok" in output, f"/dev/{dev} is not a char device after reset"
+
     def test_proc_mounted(self, userns_sandbox):
         """/proc should be mounted."""
         output, ec = userns_sandbox.run("cat /proc/1/cmdline 2>/dev/null | tr '\\0' ' '")

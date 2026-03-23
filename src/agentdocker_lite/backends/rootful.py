@@ -276,6 +276,7 @@ class RootfulSandbox(SandboxBase):
                     tmp_dir = self._upper_dir / "tmp"
                     tmp_dir.mkdir(parents=True, exist_ok=True)
                     (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
+                    (tmp_dir / ".adl_skip_dev").touch()
                     vendor_dir = Path(__file__).parent.parent / "_vendor"
                     helper_src = vendor_dir / "adl-seccomp"
                     if helper_src.exists():
