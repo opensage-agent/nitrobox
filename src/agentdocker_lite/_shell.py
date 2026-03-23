@@ -703,7 +703,7 @@ class _PersistentShell:
                 # If we got the exit code, drain any remaining stdout.
                 if exit_code is not None:
                     while True:
-                        if not ep.poll(0.001):
+                        if not ep.poll(0.01):
                             break
                         try:
                             chunk = os.read(stdout_fd, 65536)
