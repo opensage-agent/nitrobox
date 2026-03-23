@@ -1200,6 +1200,72 @@ class TestConfigSurvivesReset:
         finally:
             sb.delete()
 
+    def test_working_dir_after_reset(self, userns_sandbox):
+        """Working directory should be correct after reset."""
+        userns_sandbox.reset()
+        output, ec = userns_sandbox.run("pwd")
+        assert ec == 0
+        assert "workspace" in output
+
+    def test_environment_after_reset(self, tmp_path, shared_cache_dir):
+        """Custom environment variables should persist after reset."""
+        self._skip_if_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            environment={"MY_TEST_VAR": "hello123"},
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-env-reset")
+        try:
+            sb.reset()
+            output, ec = sb.run("echo $MY_TEST_VAR")
+            assert ec == 0
+            assert "hello123" in output, f"env var lost after reset: {output.strip()!r}"
+        finally:
+            sb.delete()
+
+    def test_snapshot_after_reset(self, tmp_path, shared_cache_dir):
+        """Snapshots should work across resets."""
+        self._skip_if_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-snap-reset")
+        try:
+            sb.run("echo v1 > /workspace/data.txt")
+            sb.snapshot("v1")
+            sb.reset()
+            sb.run("echo v2 > /workspace/data.txt")
+            sb.restore("v1")
+            output, _ = sb.run("cat /workspace/data.txt")
+            assert output.strip() == "v1"
+        finally:
+            sb.delete()
+
+    def test_background_killed_on_reset(self, userns_sandbox):
+        """Background processes should be stopped after reset."""
+        handle = userns_sandbox.run_background("sleep 100")
+        _, running = userns_sandbox.check_background(handle)
+        assert running
+        userns_sandbox.reset()
+        _, running = userns_sandbox.check_background(handle)
+        assert not running, "background process survived reset"
+
+    def test_popen_after_reset(self, userns_sandbox):
+        """popen() should work after reset."""
+        userns_sandbox.reset()
+        proc = userns_sandbox.popen("echo popen_works")
+        output = proc.stdout.read()
+        proc.wait(timeout=5)
+        assert b"popen_works" in output
+
 
 # ------------------------------------------------------------------ #
 #  Config combination tests (rootless)                                 #

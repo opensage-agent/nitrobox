@@ -1158,6 +1158,30 @@ class TestHostname:
             sb.delete()
 
 
+class TestDnsReset:
+    """Verify DNS config persists after reset."""
+
+    def test_dns_survives_reset(self, tmp_path, shared_cache_dir):
+        _requires_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            dns=["8.8.8.8", "1.1.1.1"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="dns-reset-test")
+        try:
+            sb.reset()
+            output, ec = sb.run("cat /etc/resolv.conf")
+            assert ec == 0
+            assert "8.8.8.8" in output, "dns config lost after reset"
+            assert "1.1.1.1" in output
+        finally:
+            sb.delete()
+
+
 # ------------------------------------------------------------------ #
 #  Read-only root filesystem                                           #
 # ------------------------------------------------------------------ #

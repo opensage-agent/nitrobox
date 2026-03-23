@@ -299,6 +299,10 @@ class RootfulSandbox(SandboxBase):
                 wd = self._rootfs / self._config.working_dir.lstrip("/")
                 wd.mkdir(parents=True, exist_ok=True)
 
+            # Re-write custom DNS (cleared by overlay reset)
+            if self._config.dns:
+                self._write_dns(self._config.dns)
+
             self._write_security_files(self._rootfs)
 
         self._persistent_shell.start()
