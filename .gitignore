@@ -6,5 +6,5 @@ dist/
 build/
 .venv/
 .idea/
-dev/.envrc
+dev/
 uv.lock
