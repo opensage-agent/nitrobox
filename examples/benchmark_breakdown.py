@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
-"""Per-operation latency breakdown: agentdocker-lite vs Docker vs OpenSandbox.
+"""Per-operation latency breakdown: adl vs Docker vs OpenSandbox vs SWE-MiniSandbox.
 
 Three sections:
   1. Overall comparison (create, command, reset, delete, throughput, RL loop)
   2. Per-phase breakdown (what each operation spends time on)
   3. Command-level profiling (sub-ms breakdown of a single echo command)
 
-Auto-detects available backends (Docker, OpenSandbox) and skips unavailable ones.
+Auto-detects available backends and skips unavailable ones.
 
 Usage:
     python examples/benchmark_breakdown.py
-    python examples/benchmark_breakdown.py --no-opensandbox
-    python examples/benchmark_breakdown.py --no-docker
+    python examples/benchmark_breakdown.py --no-opensandbox --no-docker
 """
 
 import argparse
@@ -414,6 +413,110 @@ async def os_reset_breakdown(n=10):
 
 
 # ====================================================================== #
+#  SWE-MiniSandbox (pexpect + PS1 matching, no container)                 #
+# ====================================================================== #
+
+def _swe_available():
+    try:
+        import swerex  # noqa: F401
+        import pexpect  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def swe_lifecycle():
+    """SWE-MiniSandbox has no container, no reset, no rootfs.
+    We benchmark: create session, command, close session."""
+    from swerex.runtime.sandbox import LocalRuntime, BashSession
+    from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
+
+    rt = LocalRuntime()
+
+    # Create session (spawn bash via pexpect)
+    t0 = time.monotonic()
+    asyncio.run(rt.create_session(CreateSandboxBashSessionRequest(
+        startup_cmd="/bin/bash --norc --noprofile",
+        startup_timeout=10,
+    )))
+    create_ms = (time.monotonic() - t0) * 1000
+
+    # Command latency
+    cmd_times = []
+    for i in range(N_COMMANDS):
+        t0 = time.monotonic()
+        asyncio.run(rt.run_in_session(BashAction(
+            command=f"echo iteration-{i}", timeout=10, check="silent",
+        )))
+        cmd_times.append((time.monotonic() - t0) * 1000)
+
+    # "Reset" = close + recreate session (no fs reset available)
+    t0 = time.monotonic()
+    asyncio.run(rt.close())
+    rt = LocalRuntime()
+    asyncio.run(rt.create_session(CreateSandboxBashSessionRequest(
+        startup_cmd="/bin/bash --norc --noprofile",
+        startup_timeout=10,
+    )))
+    reset_ms = (time.monotonic() - t0) * 1000
+
+    # Delete
+    t0 = time.monotonic()
+    asyncio.run(rt.close())
+    delete_ms = (time.monotonic() - t0) * 1000
+
+    return {"create": create_ms, "command": _med(cmd_times),
+            "reset": reset_ms, "delete": delete_ms}
+
+
+def swe_throughput(n=100):
+    from swerex.runtime.sandbox import LocalRuntime
+    from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
+
+    rt = LocalRuntime()
+    asyncio.run(rt.create_session(CreateSandboxBashSessionRequest(
+        startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10,
+    )))
+    asyncio.run(rt.run_in_session(BashAction(command="echo warmup", timeout=10, check="silent")))
+
+    t0 = time.monotonic()
+    for i in range(n):
+        asyncio.run(rt.run_in_session(BashAction(
+            command=f"echo {i}", timeout=10, check="silent",
+        )))
+    elapsed = time.monotonic() - t0
+    asyncio.run(rt.close())
+    return {"ops_sec": n / elapsed, "avg_ms": elapsed / n * 1000}
+
+
+def swe_reset_loop(n=50):
+    """SWE-MiniSandbox 'reset' = close session + reopen."""
+    from swerex.runtime.sandbox import LocalRuntime
+    from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
+
+    rt = LocalRuntime()
+    asyncio.run(rt.create_session(CreateSandboxBashSessionRequest(
+        startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10,
+    )))
+
+    times = []
+    for i in range(n):
+        asyncio.run(rt.run_in_session(BashAction(
+            command=f"echo episode-{i}", timeout=10, check="silent",
+        )))
+        t0 = time.monotonic()
+        asyncio.run(rt.close())
+        rt = LocalRuntime()
+        asyncio.run(rt.create_session(CreateSandboxBashSessionRequest(
+            startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10,
+        )))
+        times.append((time.monotonic() - t0) * 1000)
+
+    asyncio.run(rt.close())
+    return {"median_ms": _med(times)}
+
+
+# ====================================================================== #
 #  Printing helpers                                                       #
 # ====================================================================== #
 
@@ -461,6 +564,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--no-docker", action="store_true")
     parser.add_argument("--no-opensandbox", action="store_true")
+    parser.add_argument("--no-swe", action="store_true")
     args = parser.parse_args()
 
     # Auto-detect
@@ -483,11 +587,17 @@ def main():
         if not has_os:
             print("OpenSandbox not available, skipping")
 
+    has_swe = not args.no_swe and _swe_available()
+    if not args.no_swe and not has_swe:
+        print("SWE-MiniSandbox (swerex) not available, skipping")
+
     backends = ["adl"]
     if has_docker:
         backends.append("Docker")
     if has_os:
         backends.append("OpenSandbox")
+    if has_swe:
+        backends.append("SWE-Mini")
     print(f"Backends: {', '.join(backends)}")
     print(f"Image: {IMAGE}, Commands per test: {N_COMMANDS}")
 
@@ -521,6 +631,13 @@ def main():
         os_tp = asyncio.run(os_throughput())
         os_rl = asyncio.run(os_reset_loop())
 
+    swe = swe_tp = swe_rl = None
+    if has_swe:
+        print("  Running SWE-MiniSandbox...")
+        swe = swe_lifecycle()
+        swe_tp = swe_throughput()
+        swe_rl = swe_reset_loop()
+
     rows = []
     for label, key in [("Create", "create"), ("Command (median)", "command"),
                         ("Reset", "reset"), ("Delete", "delete")]:
@@ -529,6 +646,8 @@ def main():
             vals["Docker"] = docker[key]
         if os_r:
             vals["OpenSandbox"] = os_r[key]
+        if swe:
+            vals["SWE-Mini"] = swe[key]
         rows.append((label, vals))
 
     tp_vals = {"adl": adl_tp["avg_ms"]}
@@ -536,6 +655,8 @@ def main():
         tp_vals["Docker"] = docker_tp["avg_ms"]
     if os_tp:
         tp_vals["OpenSandbox"] = os_tp["avg_ms"]
+    if swe_tp:
+        tp_vals["SWE-Mini"] = swe_tp["avg_ms"]
     rows.append(("Throughput (avg/cmd)", tp_vals))
 
     rl_vals = {"adl": adl_rl["median_ms"]}
@@ -543,6 +664,8 @@ def main():
         rl_vals["Docker"] = docker_rl["median_ms"]
     if os_rl:
         rl_vals["OpenSandbox"] = os_rl["median_ms"]
+    if swe_rl:
+        rl_vals["SWE-Mini"] = swe_rl["median_ms"]
     rows.append(("RL Reset Loop", rl_vals))
 
     print()
