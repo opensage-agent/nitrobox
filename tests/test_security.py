@@ -1011,6 +1011,197 @@ class TestRenamReset:
 
 
 # ------------------------------------------------------------------ #
+#  Config survives reset (rootless)                                    #
+# ------------------------------------------------------------------ #
+
+
+class TestConfigSurvivesReset:
+    """Verify all config options are correctly restored after reset."""
+
+    def _skip_if_root(self):
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+
+    def test_seccomp_after_reset(self, tmp_path, shared_cache_dir):
+        """seccomp BPF should remain active after reset."""
+        self._skip_if_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-seccomp-reset")
+        try:
+            sb.reset()
+            output, ec = sb.run("cat /proc/self/status | grep Seccomp")
+            assert ec == 0
+            assert "2" in output, "seccomp filter not active after reset"
+            # mount should still be blocked
+            _, ec = sb.run("mount -t tmpfs tmpfs /tmp 2>/dev/null")
+            assert ec != 0, "mount should be blocked after reset"
+        finally:
+            sb.delete()
+
+    def test_hostname_after_reset(self, tmp_path, shared_cache_dir):
+        """Custom hostname should persist after reset."""
+        self._skip_if_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            hostname="persist-host",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-hostname-reset")
+        try:
+            sb.reset()
+            output, ec = sb.run("hostname")
+            assert ec == 0
+            assert "persist-host" in output, f"hostname lost after reset: {output.strip()!r}"
+        finally:
+            sb.delete()
+
+    def test_read_only_after_reset(self, tmp_path, shared_cache_dir):
+        """read_only rootfs should still be enforced after reset."""
+        self._skip_if_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            read_only=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-ro-reset")
+        try:
+            sb.reset()
+            _, ec = sb.run("touch /test_ro 2>/dev/null")
+            assert ec != 0, "rootfs should be read-only after reset"
+            # /dev/null should still work
+            _, ec = sb.run("echo x > /dev/null")
+            assert ec == 0
+        finally:
+            sb.delete()
+
+    def test_dns_after_reset(self, tmp_path, shared_cache_dir):
+        """Custom DNS config should persist after reset."""
+        self._skip_if_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            dns=["8.8.8.8", "1.1.1.1"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-dns-reset")
+        try:
+            sb.reset()
+            output, ec = sb.run("cat /etc/resolv.conf")
+            assert ec == 0
+            assert "8.8.8.8" in output, "dns config lost after reset"
+        finally:
+            sb.delete()
+
+    def test_rw_volume_after_reset(self, tmp_path, shared_cache_dir):
+        """rw volume should still be mounted and writable after reset."""
+        self._skip_if_root()
+        _requires_docker()
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "host.txt").write_text("from_host")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            volumes=[f"{shared}:/data:rw"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-rw-vol-reset")
+        try:
+            sb.reset()
+            # Can read host file
+            output, ec = sb.run("cat /data/host.txt")
+            assert ec == 0
+            assert "from_host" in output
+            # Can write to volume
+            sb.run("echo after_reset > /data/new.txt")
+            assert (shared / "new.txt").read_text().strip() == "after_reset"
+        finally:
+            sb.delete()
+
+    def test_ro_volume_after_reset(self, tmp_path, shared_cache_dir):
+        """ro volume should still be mounted and read-only after reset."""
+        self._skip_if_root()
+        _requires_docker()
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        (shared / "data.txt").write_text("read_only_data")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            volumes=[f"{shared}:/data:ro"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-ro-vol-reset")
+        try:
+            sb.reset()
+            output, ec = sb.run("cat /data/data.txt")
+            assert ec == 0
+            assert "read_only_data" in output
+            _, ec = sb.run("echo x > /data/data.txt 2>&1")
+            assert ec != 0, "ro volume should not be writable after reset"
+        finally:
+            sb.delete()
+
+    def test_net_isolate_after_reset(self, tmp_path, shared_cache_dir):
+        """net_isolate should still be enforced after reset."""
+        self._skip_if_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            net_isolate=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-net-reset")
+        try:
+            sb.reset()
+            output, ec = sb.run("ls /sys/class/net/ 2>/dev/null || echo lo")
+            assert ec == 0
+            ifaces = output.strip().split()
+            assert "lo" in ifaces
+        finally:
+            sb.delete()
+
+    def test_masked_paths_after_reset(self, tmp_path, shared_cache_dir):
+        """Sensitive paths should remain masked after reset."""
+        self._skip_if_root()
+        _requires_docker()
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="userns-mask-reset")
+        try:
+            sb.reset()
+            output, ec = sb.run("cat /proc/kcore 2>&1 | wc -c")
+            assert ec == 0
+            assert int(output.strip()) == 0, "/proc/kcore should be masked after reset"
+        finally:
+            sb.delete()
+
+
+# ------------------------------------------------------------------ #
 #  Config combination tests (rootless)                                 #
 # ------------------------------------------------------------------ #
 
