@@ -315,8 +315,8 @@ def bench_opensandbox_reset_loop() -> dict | None:
 
 def _swe_available() -> bool:
     try:
-        from swerex.runtime.sandbox import LocalRuntime  # noqa: F401
-        from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction  # noqa: F401
+        from swerex.runtime.local import LocalRuntime  # noqa: F401
+        from swerex.runtime.abstract import CreateBashSessionRequest, BashAction  # noqa: F401
         return True
     except (ImportError, ModuleNotFoundError):
         return False
@@ -328,12 +328,12 @@ def bench_swe() -> dict | None:
         return None
 
     async def _run():
-        from swerex.runtime.sandbox import LocalRuntime
-        from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
+        from swerex.runtime.local import LocalRuntime
+        from swerex.runtime.abstract import CreateBashSessionRequest, BashAction
 
         async def _create():
             rt = LocalRuntime()
-            await rt.create_session(CreateSandboxBashSessionRequest(
+            await rt.create_session(CreateBashSessionRequest(
                 startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10))
             return rt
 
@@ -374,11 +374,11 @@ def bench_swe_throughput() -> dict | None:
         return None
 
     async def _run():
-        from swerex.runtime.sandbox import LocalRuntime
-        from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
+        from swerex.runtime.local import LocalRuntime
+        from swerex.runtime.abstract import CreateBashSessionRequest, BashAction
 
         rt = LocalRuntime()
-        await rt.create_session(CreateSandboxBashSessionRequest(
+        await rt.create_session(CreateBashSessionRequest(
             startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10))
         await rt.run_in_session(BashAction(command="echo warmup", timeout=10, check="silent"))
         N = 100
@@ -399,12 +399,12 @@ def bench_swe_reset_loop() -> dict | None:
         return None
 
     async def _run():
-        from swerex.runtime.sandbox import LocalRuntime
-        from swerex.runtime.abstract import CreateSandboxBashSessionRequest, BashAction
+        from swerex.runtime.local import LocalRuntime
+        from swerex.runtime.abstract import CreateBashSessionRequest, BashAction
 
         N = 50
         rt = LocalRuntime()
-        await rt.create_session(CreateSandboxBashSessionRequest(
+        await rt.create_session(CreateBashSessionRequest(
             startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10))
         t0_total = time.monotonic()
         for i in range(N):
@@ -412,7 +412,7 @@ def bench_swe_reset_loop() -> dict | None:
                 command=f"echo episode-{i}", timeout=10, check="silent"))
             await rt.close()
             rt = LocalRuntime()
-            await rt.create_session(CreateSandboxBashSessionRequest(
+            await rt.create_session(CreateBashSessionRequest(
                 startup_cmd="/bin/bash --norc --noprofile", startup_timeout=10))
         await rt.close()
         elapsed = time.monotonic() - t0_total
