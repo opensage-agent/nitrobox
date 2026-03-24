@@ -314,7 +314,6 @@ class QemuVM:
 
     def _install_qmp_helper(self) -> None:
         """Copy the adl-qmp static binary into the sandbox."""
-        import shutil
         vendor_dir = Path(__file__).parent / "_vendor"
         helper_src = vendor_dir / "adl-qmp"
         if not helper_src.exists():
