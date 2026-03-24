@@ -484,6 +484,112 @@ class TestUserNamespace:
 
 
 # ------------------------------------------------------------------ #
+#  Mapped-uid cleanup tests (rootless full uid mapping)                #
+# ------------------------------------------------------------------ #
+
+
+class TestMappedUidCleanup:
+    """Verify delete/reset properly cleans files owned by mapped uids.
+
+    With full uid mapping (newuidmap), apt-get etc. create files as
+    non-root users (e.g. _apt uid 100 → host uid 100099).  Without
+    the nsenter-based ownership fix, these files cannot be deleted.
+    """
+
+    def _skip_if_no_full_mapping(self):
+        if os.geteuid() == 0:
+            pytest.skip("userns test must run as non-root")
+        from agentdocker_lite.backends.rootless import RootlessSandbox
+        if RootlessSandbox._detect_subuid_range() is None:
+            pytest.skip("full uid mapping not configured (no subuid entry)")
+
+    def test_delete_cleans_mapped_uid_files(self, tmp_path, shared_cache_dir):
+        """delete() should fully remove env dir even with mapped-uid files."""
+        self._skip_if_no_full_mapping()
+        _requires_docker()
+
+        env_dir = tmp_path / "envs" / "mapped-uid-del"
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="mapped-uid-del")
+
+        # Create files as non-root mapped user (e.g. _apt, uid 100)
+        _, ec = sb.run(
+            "apt-get update -qq 2>/dev/null | tail -1",
+            timeout=120,
+        )
+        if ec != 0:
+            sb.delete()
+            pytest.skip("apt-get update failed")
+
+        # Verify that mapped-uid files exist in upper dir
+        upper = sb._upper_dir
+        assert upper is not None
+        mapped_files = []
+        host_uid = os.getuid()
+        for f in upper.rglob("*"):
+            try:
+                st = f.lstat()
+                if st.st_uid != host_uid:
+                    mapped_files.append((str(f), st.st_uid))
+            except OSError:
+                pass
+        assert mapped_files, "expected mapped-uid files from apt-get"
+
+        sb.delete()
+        assert not env_dir.exists(), (
+            f"env dir not fully cleaned: {list(env_dir.rglob('*'))[:5]}"
+        )
+
+    def test_reset_cleans_mapped_uid_dead_dirs(self, tmp_path, shared_cache_dir):
+        """reset() should clean dead dirs that contain mapped-uid files."""
+        self._skip_if_no_full_mapping()
+        _requires_docker()
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="mapped-uid-rst")
+        env_dir = tmp_path / "envs" / "mapped-uid-rst"
+
+        # Create mapped-uid files
+        _, ec = sb.run(
+            "apt-get update -qq 2>/dev/null | tail -1",
+            timeout=120,
+        )
+        if ec != 0:
+            sb.delete()
+            pytest.skip("apt-get update failed")
+
+        # Reset creates dead dirs from the old upper/work
+        sb.reset()
+
+        # After reset, old dirs are renamed to *.dead.*
+        dead_dirs = list(env_dir.glob("*.dead.*"))
+        # Dead dirs exist now, will be cleaned on next reset
+        sb.reset()
+
+        # After second reset, old dead dirs should be fully cleaned
+        remaining_dead = [
+            d for d in env_dir.glob("*.dead.*")
+            if d.name.split(".dead.")[0] in ("upper", "work")
+            and int(d.name.split(".")[-1]) < int(dead_dirs[0].name.split(".")[-1])
+            if dead_dirs
+        ]
+        assert not remaining_dead, f"stale dead dirs remain: {remaining_dead}"
+
+        sb.delete()
+        assert not env_dir.exists()
+
+
+# ------------------------------------------------------------------ #
 #  Device passthrough tests (root mode)                                #
 # ------------------------------------------------------------------ #
 

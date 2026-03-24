@@ -258,6 +258,7 @@ class RootfulSandbox(SandboxBase):
         self._stop_pasta()
         t0 = time.monotonic()
 
+        self._fixup_userns_ownership()
         self._persistent_shell.kill()
 
         if self._userns:
@@ -339,6 +340,7 @@ class RootfulSandbox(SandboxBase):
                 pass
 
         self._stop_pasta()
+        self._fixup_userns_ownership()
         self._persistent_shell.kill()
 
         if not self._userns:
@@ -352,15 +354,15 @@ class RootfulSandbox(SandboxBase):
             self._cleanup_cgroup()
 
         if self._env_dir.exists():
-            # Fix 000-perm entries left by overlayfs kernel in userns mode.
-            # Both work dirs AND upper dirs can have 000-perm children
-            # (overlayfs whiteouts, opaque dirs, dpkg lock files, etc.).
+            # Fix 000-perm dirs left by overlayfs kernel in userns mode
             if self._userns:
-                for child in self._env_dir.rglob("*"):
-                    try:
-                        child.chmod(0o700)
-                    except OSError:
-                        pass
+                for work in self._env_dir.glob("*work*"):
+                    if work.is_dir():
+                        for child in work.rglob("*"):
+                            try:
+                                child.chmod(0o700)
+                            except OSError:
+                                pass
             shutil.rmtree(self._env_dir, ignore_errors=True)
 
         self._unregister(self)
@@ -829,6 +831,37 @@ class RootfulSandbox(SandboxBase):
                 d.mkdir(parents=True, exist_ok=True)
 
         self._setup_overlay()
+
+    def _fixup_userns_ownership(self) -> None:
+        """Fix ownership of files created by mapped uids before killing shell.
+
+        With full uid mapping (newuidmap), processes inside the userns can
+        create files as non-root users (e.g. ``_apt`` uid 100 → host uid
+        100099).  The host user cannot delete these files after the
+        namespace is destroyed.
+
+        Fix: while the shell is still alive, ``nsenter`` into its user
+        namespace (NOT mount namespace) and ``chown -Rh 0:0`` the env dir
+        directly on the host filesystem.  uid 0 inside the userns maps to
+        the host user, so after chown all files become deletable.
+        """
+        shell = self._persistent_shell
+        if not self._userns or not getattr(shell, '_subuid_range', None):
+            return
+        if not shell.alive:
+            return
+        pid = shell._process.pid
+        try:
+            subprocess.run(
+                [
+                    "nsenter", f"--user=/proc/{pid}/ns/user", "--",
+                    "chown", "-Rh", "0:0", str(self._env_dir),
+                ],
+                capture_output=True,
+                timeout=60,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            logger.debug("_fixup_userns_ownership failed: %s", e)
 
     def _cleanup_dead_dirs(self) -> None:
         """Remove ``*.dead.*`` dirs left by previous rename-based resets.
