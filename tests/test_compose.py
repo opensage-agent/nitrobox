@@ -608,9 +608,14 @@ class TestComposeProject:
             assert ec == 0
             assert "hello-compose" in output
 
-            # Write a file, reset should clear it
+            # Write a file, reset should clear it but service command restarts
             sb.run("echo ephemeral > /tmp/test.txt")
             proj.reset()
+
+            # Service command should have restarted after reset
+            output, ec = sb.run("echo post-reset-ok")
+            assert ec == 0
+            assert "post-reset-ok" in output
             _, ec = sb.run("cat /tmp/test.txt 2>/dev/null")
             assert ec != 0  # file gone after reset
         finally:
@@ -646,6 +651,12 @@ class TestComposeProject:
             # /etc/hosts should resolve service names
             output, ec = proj.services["frontend"].run("getent hosts backend")
             assert ec == 0
+            assert "127.0.0.1" in output
+
+            # After reset, /etc/hosts should still work
+            proj.reset()
+            output, ec = proj.services["frontend"].run("getent hosts backend")
+            assert ec == 0, f"hosts resolution failed after reset: {output}"
             assert "127.0.0.1" in output
         finally:
             proj.down()
@@ -686,6 +697,12 @@ class TestComposeProject:
             mnt_a, _ = proj.services["svc_a"].run("readlink /proc/1/ns/mnt")
             mnt_b, _ = proj.services["svc_b"].run("readlink /proc/1/ns/mnt")
             assert mnt_a.strip() != mnt_b.strip(), "mount namespaces should differ"
+
+            # After reset, shared netns should survive
+            proj.reset()
+            ns_a2, _ = proj.services["svc_a"].run("readlink /proc/1/ns/net")
+            ns_b2, _ = proj.services["svc_b"].run("readlink /proc/1/ns/net")
+            assert ns_a2.strip() == ns_b2.strip(), "shared netns lost after reset"
         finally:
             proj.down()
 

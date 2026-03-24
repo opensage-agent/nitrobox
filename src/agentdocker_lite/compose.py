@@ -543,10 +543,14 @@ class ComposeProject:
         Filesystem-level reset: clears all changes, restarts service
         processes.  No application-level reset endpoints needed.
         """
+        hosts_entries = {name: "127.0.0.1" for name in self._defs}
+
         for name in self._startup_order:
             sb = self._sandboxes.get(name)
             if sb:
                 sb.reset()
+                # Re-write /etc/hosts (cleared by upper dir reset)
+                self._write_hosts(sb, hosts_entries)
 
         # Re-start all service commands after reset
         for name in self._startup_order:
@@ -680,15 +684,18 @@ class ComposeProject:
         config = SandboxConfig(**config_kwargs)
         sb = Sandbox(config, name=sandbox_name)
 
-        # Write /etc/hosts entries for service name resolution
+        self._write_hosts(sb, hosts)
+        return sb
+
+    @staticmethod
+    def _write_hosts(sb: Sandbox, hosts: dict[str, str]) -> None:
+        """Write /etc/hosts entries for service name resolution."""
         hosts_lines = "\n".join(f"{ip}\t{name}" for name, ip in hosts.items())
         try:
             existing = sb.read_file("/etc/hosts")
         except Exception:
             existing = ""
         sb.write_file("/etc/hosts", existing.rstrip() + "\n" + hosts_lines + "\n")
-
-        return sb
 
     def _cmd_string(self, svc: _Service) -> Optional[str]:
         """Build the shell command to start a service."""
