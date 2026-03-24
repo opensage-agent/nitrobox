@@ -799,3 +799,38 @@ class TestComposeProject:
             assert "persistent" in output
         finally:
             proj.down()
+
+    def test_network_mode_host(self, tmp_path, shared_cache_dir):
+        """network_mode: host should use host network, not SharedNetwork."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              host_svc:
+                image: ubuntu:22.04
+                network_mode: host
+                command: "sleep infinity"
+              normal_svc:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-hostnet",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            # host_svc should see host network interfaces
+            # normal_svc is on SharedNetwork (isolated netns)
+            ns_host, _ = proj.services["host_svc"].run("readlink /proc/1/ns/net")
+            ns_normal, _ = proj.services["normal_svc"].run("readlink /proc/1/ns/net")
+            # They should be different — host_svc is on host netns
+            assert ns_host.strip() != ns_normal.strip(), (
+                "host mode and normal mode should have different netns"
+            )
+        finally:
+            proj.down()

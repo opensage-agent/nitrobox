@@ -59,6 +59,58 @@ class TestCli:
         assert result.returncode == 0
         assert "usage" in result.stdout.lower() or "ps" in result.stdout
 
+    def test_cleanup_orphaned_dir(self, tmp_path):
+        """cleanup should remove dirs with work/ but no .pid file."""
+        _skip_if_root()
+        env_dir = str(tmp_path / "envs")
+        # Simulate orphaned sandbox dir (partial atexit cleanup)
+        orphan = tmp_path / "envs" / "orphan-sandbox"
+        (orphan / "work" / "work").mkdir(parents=True)
+        (orphan / "work" / "work").chmod(0o000)
+        (orphan / "upper").mkdir()
+
+        result = _adl("--dir", env_dir, "cleanup")
+        assert result.returncode == 0
+        assert not orphan.exists(), f"orphan dir not cleaned: {list(orphan.rglob('*'))}"
+
+    def test_kill_all(self, tmp_path, shared_cache_dir):
+        """kill --all should kill all sandboxes."""
+        _skip_if_root()
+        _requires_docker()
+        env_dir = str(tmp_path / "envs")
+
+        # Create sandboxes in subprocesses (so adl kill --all
+        # doesn't SIGTERM the test process itself)
+        procs = []
+        for name in ("kill-all-1", "kill-all-2"):
+            p = subprocess.Popen(
+                ["python", "-c",
+                 f"from agentdocker_lite import Sandbox, SandboxConfig; import time; "
+                 f"Sandbox(SandboxConfig(image='{TEST_IMAGE}', "
+                 f"env_base_dir='{env_dir}', "
+                 f"rootfs_cache_dir='{shared_cache_dir}'), "
+                 f"name='{name}'); time.sleep(60)"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            procs.append(p)
+        time.sleep(2)
+
+        try:
+            result = _adl("--dir", env_dir, "ps")
+            assert "kill-all-1" in result.stdout
+            assert "kill-all-2" in result.stdout
+
+            result = _adl("--dir", env_dir, "kill", "--all")
+            assert result.returncode == 0
+
+            result = _adl("--dir", env_dir, "ps")
+            assert "No sandboxes" in result.stdout
+        finally:
+            for p in procs:
+                if p.poll() is None:
+                    p.kill()
+                    p.wait()
+
     def test_ps_shows_running_sandbox(self, tmp_path, shared_cache_dir):
         """ps should list a running sandbox."""
         _skip_if_root()
