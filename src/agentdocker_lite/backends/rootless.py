@@ -238,9 +238,11 @@ class RootlessSandbox(RootfulSandbox):
         if config.oom_score_adj is not None:
             self._apply_oom_score_adj(config.oom_score_adj)
 
-        # Write PID file for stale sandbox cleanup
+        # Write PID file for stale sandbox cleanup.
+        # Store the shell process PID (not the creator's PID) so that
+        # adl kill can terminate the sandbox without killing the owner.
         pid_file = self._env_dir / ".pid"
-        pid_file.write_text(str(os.getpid()))
+        pid_file.write_text(str(self._persistent_shell._process.pid))
 
         self.features: dict[str, object] = {
             "userns": True,

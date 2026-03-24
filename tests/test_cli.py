@@ -130,12 +130,12 @@ class TestCli:
             sb.delete()
 
     def test_kill_and_cleanup(self, tmp_path, shared_cache_dir):
-        """kill + cleanup should fully remove a sandbox."""
+        """kill should terminate the sandbox shell and clean up the dir."""
         _skip_if_root()
         _requires_docker()
         env_dir = str(tmp_path / "envs")
 
-        # Start sandbox in a subprocess so we can kill the owner
+        # Create sandbox in subprocess
         proc = subprocess.Popen(
             [
                 "python", "-c",
@@ -150,25 +150,56 @@ class TestCli:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        time.sleep(2)  # wait for sandbox to start
+        time.sleep(2)
 
         try:
-            # Verify it shows up
             result = _adl("--dir", env_dir, "ps")
             assert "cli-kill-test" in result.stdout
 
-            # Kill it — adl kill now also runs cleanup_stale internally
+            # adl kill targets the shell process, not the owner
             result = _adl("--dir", env_dir, "kill", "cli-kill-test")
             assert result.returncode == 0
             assert "killed" in result.stdout
 
-            # Directory should be fully cleaned by kill's auto-cleanup
+            # Dir should be cleaned by kill's auto-cleanup
             import pathlib
             env_path = pathlib.Path(env_dir)
             assert not (env_path / "cli-kill-test").exists(), (
                 f"sandbox dir not cleaned: {list((env_path / 'cli-kill-test').rglob('*'))}"
             )
+
+            # Owner subprocess should still be alive (only shell was killed)
+            assert proc.poll() is None, "owner process should not be killed"
         finally:
             if proc.poll() is None:
                 proc.kill()
                 proc.wait()
+
+    def test_kill_from_owner_process(self, tmp_path, shared_cache_dir):
+        """adl kill from the sandbox owner process should not kill itself."""
+        _skip_if_root()
+        _requires_docker()
+        env_dir = str(tmp_path / "envs")
+
+        sb = Sandbox(SandboxConfig(
+            image=TEST_IMAGE,
+            env_base_dir=env_dir,
+            rootfs_cache_dir=shared_cache_dir,
+        ), name="kill-self-test")
+
+        result = _adl("--dir", env_dir, "ps")
+        assert "kill-self-test" in result.stdout
+
+        # adl kill should kill the shell, not us
+        result = _adl("--dir", env_dir, "kill", "kill-self-test")
+        assert result.returncode == 0
+
+        # We're still alive — the test process wasn't killed
+        # Sandbox is now broken (shell dead) but we can still clean up
+        try:
+            sb.delete()
+        except Exception:
+            pass  # shell already dead, delete may partially fail
+        # cleanup_stale handles the rest
+        from agentdocker_lite.backends.base import SandboxBase
+        SandboxBase.cleanup_stale(env_dir)
