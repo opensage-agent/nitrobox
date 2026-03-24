@@ -299,6 +299,8 @@ class SandboxConfig:
         if self.memory_swap:
             if self.memory_swap == "-1":
                 self.memory_swap = "max"
+            elif self.memory_swap == "0":
+                self.memory_swap = None  # Docker: 0 means unset
             else:
                 swap_total = int(_parse_size(self.memory_swap))
                 mem_max = int(self.memory_max) if self.memory_max else 0

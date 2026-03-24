@@ -1367,6 +1367,11 @@ class TestMemorySwap:
         cfg = SandboxConfig(image="x", memory_swap="-1")
         assert cfg.memory_swap == "max"
 
+    def test_zero_means_unset(self):
+        """Docker: memory_swap=0 is treated as unset."""
+        cfg = SandboxConfig(image="x", memory_swap="0")
+        assert cfg.memory_swap is None
+
     def test_docker_semantics(self):
         """memory_swap=1g with memory_max=512m → swap=512m."""
         cfg = SandboxConfig(image="x", memory_max="512m", memory_swap="1g")

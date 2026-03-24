@@ -185,7 +185,12 @@ _SUPPORTED_SERVICE_KEYS = frozenset({
 
 
 def _parse_env_file(filepath: Path) -> dict[str, str]:
-    """Parse a Docker-style env file into a dict."""
+    """Parse a Docker-style env file into a dict.
+
+    Supports ``VAR=VAL``, ``VAR:VAL``, ``VAR=`` (empty), and ``VAR``
+    (inherit from host).  Lines starting with ``#`` are comments.
+    Quotes (single/double) around values are stripped.
+    """
     env: dict[str, str] = {}
     if not filepath.exists():
         logger.warning("env_file not found: %s", filepath)
@@ -194,13 +199,17 @@ def _parse_env_file(filepath: Path) -> dict[str, str]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        if "=" in line:
-            k, _, v = line.partition("=")
-            v = v.strip()
-            if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
-                v = v[1:-1]
-            env[k.strip()] = v
+        # Docker supports both = and : as delimiters
+        for delim in ("=", ":"):
+            if delim in line:
+                k, _, v = line.partition(delim)
+                v = v.strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                    v = v[1:-1]
+                env[k.strip()] = v
+                break
         else:
+            # No delimiter — inherit from host environment
             env[line] = os.environ.get(line, "")
     return env
 
