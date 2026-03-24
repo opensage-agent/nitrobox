@@ -54,7 +54,25 @@ class RootfulSandbox(SandboxBase):
         self._config = config
         self._name = name
         self._userns = False
-        self._init_rootful(config, name)
+        self._bg_handles: dict[str, str] = {}
+        self._pasta_process = None
+        try:
+            self._init_rootful(config, name)
+        except Exception:
+            env_dir = getattr(self, "_env_dir", None)
+            if env_dir and env_dir.exists():
+                # Unmount if anything was mounted
+                rootfs = getattr(self, "_rootfs", None)
+                if rootfs:
+                    subprocess.run(["umount", "-l", str(rootfs)],
+                                   capture_output=True)
+                for child in env_dir.rglob("*"):
+                    try:
+                        child.chmod(0o700)
+                    except OSError:
+                        pass
+                shutil.rmtree(env_dir, ignore_errors=True)
+            raise
         self._register(self)
 
     # ------------------------------------------------------------------ #

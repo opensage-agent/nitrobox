@@ -50,7 +50,21 @@ class RootlessSandbox(RootfulSandbox):
         self._config = config
         self._name = name
         self._userns = True
-        self._init_userns(config, name)
+        self._bg_handles: dict[str, str] = {}
+        self._pasta_process = None
+        try:
+            self._init_userns(config, name)
+        except Exception:
+            # Clean up overlayfs work dirs (kernel creates d--------- entries)
+            env_dir = getattr(self, "_env_dir", None)
+            if env_dir and env_dir.exists():
+                for child in env_dir.rglob("*"):
+                    try:
+                        child.chmod(0o700)
+                    except OSError:
+                        pass
+                shutil.rmtree(env_dir, ignore_errors=True)
+            raise
         self._register(self)
 
     # ------------------------------------------------------------------ #
