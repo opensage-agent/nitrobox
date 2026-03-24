@@ -239,7 +239,8 @@ class SandboxConfig:
             Requires ``pasta`` (from the ``passt`` package). Automatically
             enables network isolation with NAT'd internet access.
         shm_size: Size of ``/dev/shm`` tmpfs mount (e.g. ``"256m"``,
-            ``"2g"``).  ``None`` uses 64MB default (matches Docker).
+            ``"2g"``).  Default 64MB (matches Docker).  Set larger
+            for QEMU/PyTorch workloads that need more shared memory.
         cpu_shares: Relative CPU weight (Docker ``--cpu-shares``).
             Converted to cgroup v2 ``cpu.weight``.  Default 1024 = normal.
         memory_swap: Total memory + swap limit (Docker semantics).
