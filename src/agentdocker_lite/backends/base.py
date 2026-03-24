@@ -5,14 +5,16 @@ from __future__ import annotations
 import abc
 import logging
 import os
+import re
 import shlex
 import shutil
+import stat
 import subprocess
 import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 if TYPE_CHECKING:
     from agentdocker_lite._shell import _PersistentShell
@@ -28,17 +30,154 @@ logger = logging.getLogger(__name__)
 def _parse_size(value: str) -> str:
     """Parse human-readable size to bytes string.
 
-    Supports: "512m", "2g", "1.5G", "4096", "536870912".
+    Supports: "512m", "2g", "1.5G", "10mb", "1gb", "4096", "536870912".
     Returns the value as a string of bytes for cgroup writes.
     """
     value = value.strip()
     if not value:
         return value
     suffixes = {"k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}
+    # Strip trailing "b"/"B" so "10mb" → "10m", "1gb" → "1g"
+    lowered = value.lower()
+    if len(lowered) >= 2 and lowered[-1] == "b" and lowered[-2] in suffixes:
+        value = value[:-1]
     last = value[-1].lower()
     if last in suffixes:
         return str(int(float(value[:-1]) * suffixes[last]))
     return value
+
+
+_CPU_PERIOD = 100_000  # 100ms in microseconds
+
+
+def _parse_cpu_max(value: str) -> str:
+    """Parse human-friendly CPU limit to cgroup v2 ``cpu.max`` format.
+
+    Accepts:
+      - ``"0.5"``  → ``"50000 100000"`` (50% of one core)
+      - ``"2"``    → ``"200000 100000"`` (2 cores)
+      - ``"50%"``  → ``"50000 100000"`` (50% of one core)
+      - ``"50000 100000"`` → passed through unchanged
+    """
+    value = value.strip()
+    if " " in value:
+        return value
+    if value.endswith("%"):
+        fraction = float(value[:-1]) / 100.0
+    else:
+        fraction = float(value)
+    quota = int(fraction * _CPU_PERIOD)
+    if quota < 1:
+        quota = 1
+    return f"{quota} {_CPU_PERIOD}"
+
+
+_IO_PARAM_RE = re.compile(r"((?:r|w)(?:bps|iops))=(\S+)")
+
+
+def _parse_io_max(value: str) -> str:
+    """Parse human-friendly I/O limit to cgroup v2 ``io.max`` format.
+
+    Accepts:
+      - ``"/dev/sda 10mb"``           → ``"MAJ:MIN wbps=10485760"``
+      - ``"/dev/sda wbps=10mb"``      → ``"MAJ:MIN wbps=10485760"``
+      - ``"/dev/sda rbps=5mb wbps=10mb"`` → ``"MAJ:MIN rbps=5242880 wbps=10485760"``
+      - ``"259:0 wbps=10485760"``     → passed through unchanged
+
+    When a bare size is given (no ``wbps=``/``rbps=`` prefix), it is
+    treated as ``wbps=<size>``.
+    """
+    value = value.strip()
+    parts = value.split()
+    if len(parts) < 2:
+        return value
+
+    dev = parts[0]
+    # Resolve /dev/xxx to MAJ:MIN
+    if dev.startswith("/dev/"):
+        dev_path = Path(dev)
+        if dev_path.exists():
+            st = dev_path.stat()
+            if stat.S_ISBLK(st.st_mode):
+                dev = f"{os.major(st.st_rdev)}:{os.minor(st.st_rdev)}"
+        # If the device doesn't exist, leave as-is (will fail at cgroup write)
+
+    rest = parts[1:]
+    # Check if any part has key=value format
+    has_params = any("=" in p for p in rest)
+    if has_params:
+        # Parse each key=value, converting sizes
+        params = []
+        for p in rest:
+            m = _IO_PARAM_RE.match(p)
+            if m:
+                params.append(f"{m.group(1)}={_parse_size(m.group(2))}")
+            else:
+                params.append(p)
+        return f"{dev} {' '.join(params)}"
+    else:
+        # Bare size: treat as wbps limit
+        raw_size = _parse_size(rest[0])
+        return f"{dev} wbps={raw_size}"
+
+
+# ------------------------------------------------------------------ #
+#  Docker format converters (used by from_docker / from_docker_run)    #
+# ------------------------------------------------------------------ #
+
+def _convert_docker_volumes(raw) -> list[str]:
+    """Convert Docker SDK volume format to SandboxConfig volume list.
+
+    Accepts:
+      - dict: ``{"/host": {"bind": "/container", "mode": "ro"}}``
+      - list: ``["/host:/container:ro"]`` (passed through)
+    """
+    if isinstance(raw, list):
+        return raw
+    result = []
+    for host_path, spec in raw.items():
+        bind = spec.get("bind", host_path) if isinstance(spec, dict) else spec
+        mode = spec.get("mode", "rw") if isinstance(spec, dict) else "rw"
+        result.append(f"{host_path}:{bind}:{mode}")
+    return result
+
+
+def _convert_docker_ports(raw) -> list[str]:
+    """Convert Docker SDK port format to SandboxConfig port_map list.
+
+    Accepts:
+      - dict: ``{"80/tcp": 8080}`` or ``{"80/tcp": [8080, 8081]}``
+      - list: ``["8080:80"]`` (passed through)
+    """
+    if isinstance(raw, list):
+        return raw
+    result = []
+    for container_spec, host_spec in raw.items():
+        container_port = str(container_spec).split("/")[0]
+        if host_spec is None:
+            continue
+        if isinstance(host_spec, (list, tuple)):
+            for hp in host_spec:
+                result.append(f"{hp}:{container_port}")
+        else:
+            result.append(f"{host_spec}:{container_port}")
+    return result
+
+
+def _convert_docker_env(raw) -> dict[str, str]:
+    """Convert Docker SDK environment format to dict.
+
+    Accepts:
+      - dict: ``{"KEY": "VALUE"}`` (passed through)
+      - list: ``["KEY=VALUE"]``
+    """
+    if isinstance(raw, dict):
+        return raw
+    result = {}
+    for entry in raw:
+        k, _, v = entry.partition("=")
+        result[k] = v
+    return result
 
 
 @dataclass
@@ -57,8 +196,11 @@ class SandboxConfig:
         rootfs_cache_dir: Directory to cache auto-prepared rootfs images.
             Defaults to ``$XDG_CACHE_HOME/agentdocker_lite/rootfs``
             (typically ``~/.cache/agentdocker_lite/rootfs``).
-        cpu_max: cgroup v2 ``cpu.max`` value (e.g. ``"50000 100000"``).
-        memory_max: cgroup v2 ``memory.max`` value in bytes.
+        cpu_max: CPU limit.  Accepts a fraction of cores (``"0.5"`` = half
+            a core, ``"2"`` = two cores), a percentage (``"50%"``), or the
+            raw cgroup v2 ``cpu.max`` format (``"50000 100000"``).
+        memory_max: Memory limit.  Accepts human-readable sizes
+            (``"512m"``, ``"2g"``) or raw bytes (``"536870912"``).
         pids_max: cgroup v2 ``pids.max`` value.
         tty: Use a pseudo-terminal instead of pipes for command I/O.
             Enables ``write_stdin()`` for interactive programs.  Default
@@ -76,8 +218,10 @@ class SandboxConfig:
             ``None`` inherits from host.
         read_only: Make the root filesystem read-only.  Writes are
             only allowed to volumes and tmpfs mounts.
-        io_max: cgroup v2 ``io.max`` value for disk I/O throttling
-            (e.g. ``"259:0 wbps=10485760"`` for 10MB/s write on device 259:0).
+        io_max: Disk I/O throttle.  Accepts human-readable forms like
+            ``"/dev/sda 10mb"`` (10 MB/s write limit) or
+            ``"/dev/sda rbps=5mb wbps=10mb"``.  Also accepts raw cgroup v2
+            ``io.max`` format (``"259:0 wbps=10485760"``).
         net_ns: Path to an existing network namespace file to join
             (e.g. ``"/proc/123/ns/net"``).  The sandbox shares the
             network stack with other processes in the same netns.
@@ -122,9 +266,242 @@ class SandboxConfig:
         if not self.rootfs_cache_dir:
             cache_home = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
             self.rootfs_cache_dir = os.path.join(cache_home, "agentdocker_lite", "rootfs")
-        # Parse human-readable sizes (e.g. "512m", "2g") to bytes.
+        # Parse human-readable resource limits.
         if self.memory_max:
             self.memory_max = _parse_size(self.memory_max)
+        if self.cpu_max:
+            self.cpu_max = _parse_cpu_max(self.cpu_max)
+        if self.io_max:
+            self.io_max = _parse_io_max(self.io_max)
+
+    # ------------------------------------------------------------------ #
+    #  Docker compatibility constructors                                   #
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def from_docker(cls, image: str, **kwargs) -> SandboxConfig:
+        """Create a SandboxConfig from Docker Python SDK parameters.
+
+        Accepts the same keyword arguments as
+        ``docker.containers.run()`` and maps them to SandboxConfig
+        fields.  Unsupported parameters are silently ignored with a
+        logged warning.
+
+        Example::
+
+            # Before (Docker SDK):
+            client.containers.run("python:3.11", cpus=0.5,
+                mem_limit="512m", ports={"80/tcp": 8080})
+
+            # After (agentdocker-lite):
+            cfg = SandboxConfig.from_docker("python:3.11", cpus=0.5,
+                mem_limit="512m", ports={"80/tcp": 8080})
+            sb = Sandbox(cfg)
+        """
+        cfg_kwargs: dict[str, Any] = {"image": image}
+
+        # --- CPU ---
+        if "cpus" in kwargs:
+            cfg_kwargs["cpu_max"] = str(kwargs.pop("cpus"))
+        if "cpuset_cpus" in kwargs:
+            cfg_kwargs["cpuset_cpus"] = kwargs.pop("cpuset_cpus")
+
+        # --- Memory ---
+        if "mem_limit" in kwargs:
+            v = kwargs.pop("mem_limit")
+            cfg_kwargs["memory_max"] = str(v)
+        if "pids_limit" in kwargs:
+            cfg_kwargs["pids_max"] = str(kwargs.pop("pids_limit"))
+
+        # --- Filesystem ---
+        if "read_only" in kwargs:
+            cfg_kwargs["read_only"] = kwargs.pop("read_only")
+        if "working_dir" in kwargs:
+            cfg_kwargs["working_dir"] = kwargs.pop("working_dir")
+
+        # --- Volumes: dict or list ---
+        if "volumes" in kwargs:
+            raw = kwargs.pop("volumes")
+            cfg_kwargs["volumes"] = _convert_docker_volumes(raw)
+
+        # --- Ports: dict ---
+        if "ports" in kwargs:
+            raw = kwargs.pop("ports")
+            cfg_kwargs["port_map"] = _convert_docker_ports(raw)
+
+        # --- Environment: dict or list ---
+        if "environment" in kwargs:
+            raw = kwargs.pop("environment")
+            cfg_kwargs["environment"] = _convert_docker_env(raw)
+
+        # --- Networking ---
+        if "hostname" in kwargs:
+            cfg_kwargs["hostname"] = kwargs.pop("hostname")
+        if "dns" in kwargs:
+            cfg_kwargs["dns"] = kwargs.pop("dns")
+        if "network_mode" in kwargs:
+            mode = kwargs.pop("network_mode")
+            if mode == "none":
+                cfg_kwargs["net_isolate"] = True
+
+        # --- Devices ---
+        if "devices" in kwargs:
+            raw = kwargs.pop("devices")
+            cfg_kwargs["devices"] = [d.split(":")[0] for d in raw]
+
+        # --- Security ---
+        if "security_opt" in kwargs:
+            opts = kwargs.pop("security_opt")
+            for opt in opts:
+                if opt in ("no-new-privileges", "no-new-privileges:true"):
+                    pass  # already default
+                if opt == "seccomp=unconfined":
+                    cfg_kwargs["seccomp"] = False
+        if "privileged" in kwargs:
+            if kwargs.pop("privileged"):
+                cfg_kwargs["seccomp"] = False
+
+        # --- TTY ---
+        if "tty" in kwargs:
+            cfg_kwargs["tty"] = kwargs.pop("tty")
+
+        # --- OOM ---
+        if "oom_score_adj" in kwargs:
+            cfg_kwargs["oom_score_adj"] = kwargs.pop("oom_score_adj")
+
+        # Pop known-but-unsupported params silently
+        _docker_ignored = {
+            "command", "entrypoint", "name", "detach", "remove",
+            "auto_remove", "stdout", "stderr", "stream", "user",
+            "labels", "log_config", "nano_cpus", "network",
+            "network_disabled", "platform", "runtime", "shm_size",
+            "stdin_open", "stop_signal", "tmpfs", "ulimits",
+            "memswap_limit", "mem_swappiness", "cap_add", "cap_drop",
+            "restart_policy", "healthcheck", "init", "ipc_mode",
+            "isolation", "pid_mode", "publish_all_ports",
+        }
+        for key in _docker_ignored:
+            kwargs.pop(key, None)
+
+        if kwargs:
+            logger.warning(
+                "SandboxConfig.from_docker: ignoring unsupported params: %s",
+                ", ".join(sorted(kwargs)),
+            )
+
+        return cls(**cfg_kwargs)
+
+    @classmethod
+    def from_docker_run(cls, cmd: str) -> SandboxConfig:
+        """Create a SandboxConfig by parsing a ``docker run`` command string.
+
+        Example::
+
+            cfg = SandboxConfig.from_docker_run(
+                "docker run --cpus=0.5 -m 512m -v /data:/data:ro "
+                "-p 8080:80 --hostname worker python:3.11"
+            )
+            sb = Sandbox(cfg)
+        """
+        args = shlex.split(cmd)
+        # Strip leading "docker" and "run"
+        while args and args[0] in ("docker", "sudo"):
+            args.pop(0)
+        if args and args[0] == "run":
+            args.pop(0)
+
+        kwargs: dict[str, Any] = {}
+        volumes: list[str] = []
+        ports: list[str] = []
+        env: dict[str, str] = {}
+        devices: list[str] = []
+        dns: list[str] = []
+        image: str = ""
+
+        i = 0
+        while i < len(args):
+            a = args[i]
+
+            # Split --key=value
+            if a.startswith("--") and "=" in a:
+                key, _, val = a.partition("=")
+                a = key
+            else:
+                val = ""
+
+            if a in ("-v", "--volume"):
+                volumes.append(val or args[i + 1]); i += 1 if not val else 0
+            elif a in ("-p", "--publish"):
+                ports.append(val or args[i + 1]); i += 1 if not val else 0
+            elif a in ("-e", "--env"):
+                entry = val or args[i + 1]; i += 1 if not val else 0
+                k, _, v = entry.partition("=")
+                env[k] = v
+            elif a == "--device":
+                devices.append((val or args[i + 1]).split(":")[0]); i += 1 if not val else 0
+            elif a == "--dns":
+                dns.append(val or args[i + 1]); i += 1 if not val else 0
+            elif a in ("--cpus",):
+                kwargs["cpu_max"] = val or args[i + 1]; i += 1 if not val else 0
+            elif a in ("-m", "--memory"):
+                kwargs["memory_max"] = val or args[i + 1]; i += 1 if not val else 0
+            elif a == "--pids-limit":
+                kwargs["pids_max"] = val or args[i + 1]; i += 1 if not val else 0
+            elif a == "--cpuset-cpus":
+                kwargs["cpuset_cpus"] = val or args[i + 1]; i += 1 if not val else 0
+            elif a in ("-h", "--hostname"):
+                kwargs["hostname"] = val or args[i + 1]; i += 1 if not val else 0
+            elif a in ("-w", "--workdir"):
+                kwargs["working_dir"] = val or args[i + 1]; i += 1 if not val else 0
+            elif a == "--read-only":
+                kwargs["read_only"] = True
+            elif a == "--privileged":
+                kwargs["seccomp"] = False
+            elif a == "--network":
+                mode = val or args[i + 1]; i += 1 if not val else 0
+                if mode == "none":
+                    kwargs["net_isolate"] = True
+            elif a == "--name":
+                i += 1 if not val else 0  # skip
+            elif a in ("-d", "--detach", "--rm", "-i", "--interactive",
+                       "-t", "--tty", "--init"):
+                if a in ("-t", "--tty"):
+                    kwargs["tty"] = True
+            elif a.startswith("-") and not a.startswith("--") and len(a) > 2:
+                # Combined short boolean flags like -dit, -it
+                _bool_flags = set("ditPq")
+                if all(c in _bool_flags for c in a[1:]):
+                    if "t" in a:
+                        kwargs["tty"] = True
+                else:
+                    if i + 1 < len(args) and not args[i + 1].startswith("-"):
+                        i += 1
+            elif a.startswith("-"):
+                # Unknown flag — skip its value if it looks like a flag+arg
+                if not val and i + 1 < len(args) and not args[i + 1].startswith("-"):
+                    i += 1
+            else:
+                # Positional: image (first), then command (rest ignored)
+                if not image:
+                    image = a
+                # command args after image are ignored
+            i += 1
+
+        if not image:
+            raise ValueError("No image found in docker run command")
+
+        if volumes:
+            kwargs["volumes"] = volumes
+        if ports:
+            kwargs["port_map"] = ports
+        if env:
+            kwargs["environment"] = env
+        if devices:
+            kwargs["devices"] = devices
+        if dns:
+            kwargs["dns"] = dns
+
+        return cls(image=image, **kwargs)
 
 
 # ====================================================================== #

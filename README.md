@@ -7,7 +7,58 @@
 
 Lightweight Linux namespace sandbox with persistent shell and instant filesystem reset.
 
-**45–127x faster lifecycle** than Docker. Designed for high-frequency workloads like RL training where environments are created, reset, and destroyed thousands of times.
+**50x faster lifecycle** than Docker. Designed for high-frequency workloads like RL training where environments are created, reset, and destroyed thousands of times.
+
+## Drop-in Docker replacement
+
+Real-world example: [SWE-bench](https://www.swebench.com/) evaluation runs 2,294 task instances, each creating a Docker container, applying a patch, running tests, and destroying it. Here's how to migrate:
+
+<table>
+<tr><th>SWE-bench (Docker SDK)</th><th>agentdocker-lite</th></tr>
+<tr>
+<td>
+
+```python
+import docker
+client = docker.from_env()
+
+for task in swebench_tasks:
+    # Create — ~320ms
+    c = client.containers.run(
+        task.instance_image,
+        command="tail -f /dev/null",
+        detach=True,
+    )
+    # Eval — ~17ms/cmd
+    c.exec_run("bash /eval.sh")
+
+    # "Reset" = destroy + recreate — ~820ms
+    c.stop(); c.remove()
+```
+</td>
+<td>
+
+```python
+from agentdocker_lite import Sandbox, SandboxConfig
+
+for task in swebench_tasks:
+    # Create — ~7ms (45x faster)
+    sb = Sandbox(SandboxConfig.from_docker(
+        task.instance_image,
+    ))
+    # Eval — ~11ms/cmd (1.7x faster)
+    sb.run("bash /eval.sh")
+
+    # Reset — ~7ms (82x faster, no recreate)
+    sb.reset()
+```
+</td>
+</tr>
+</table>
+
+Same images, same parameters — no root required. Also supports [`from_docker_run()`](docs/quick_start.md#sandboxconfigfrom_docker_run-cli-command-string) for CLI commands and [`ComposeProject`](docs/quick_start.md#docker-compose-compatibility) for docker-compose.yml.
+
+Reproduce: `python examples/bench_swebench.py` (numbers above measured on Ryzen 9800X3D; results vary by CPU)
 
 ## Key features
 
@@ -91,10 +142,10 @@ SandboxConfig(
     ],
 
     # Resource limits (cgroup v2)
-    cpu_max="50000 100000",         # 50% of one CPU
+    cpu_max="0.5",                  # 50% of one CPU (also: "2" for 2 cores, "50%")
     memory_max="512m",              # 512MB (also accepts "2g", "536870912")
     pids_max="256",
-    io_max="/dev/sda 10485760",     # 10MB/s write limit
+    io_max="/dev/sda 10mb",         # 10MB/s write limit (also: "rbps=5mb wbps=10mb")
     cpuset_cpus="0-3",              # Pin to CPU 0-3
     oom_score_adj=500,              # Prefer killing sandbox over host
 
@@ -254,6 +305,16 @@ Install: `pip install agentdocker-lite` provides the `adl` command.
 
 ## Docker migration cheatsheet
 
+**Auto-convert** — paste your existing Docker invocation directly:
+
+| Docker | agentdocker-lite |
+|---|---|
+| `client.containers.run("img", cpus=0.5, ...)` | `SandboxConfig.from_docker("img", cpus=0.5, ...)` |
+| `docker run --cpus=0.5 -m 512m img` | `SandboxConfig.from_docker_run("docker run --cpus=0.5 -m 512m img")` |
+| `docker compose up -d` | `ComposeProject("docker-compose.yml").up()` |
+
+**Manual mapping:**
+
 | Docker | agentdocker-lite |
 |---|---|
 | `docker run -d ubuntu:22.04` | `sb = Sandbox(SandboxConfig(image="ubuntu:22.04"))` |
@@ -267,7 +328,7 @@ Install: `pip install agentdocker-lite` provides the `adl` command.
 | `-v /host:/container:rw` | `volumes=["/host:/container:rw"]` |
 | *(no equivalent)* | `volumes=["/host:/container:cow"]` |
 | `--memory 512m` | `memory_max="512m"` |
-| `--cpus 0.5` | `cpu_max="50000 100000"` |
+| `--cpus 0.5` | `cpu_max="0.5"` |
 | `--pids-limit 256` | `pids_max="256"` |
 | `--hostname worker-0` | `hostname="worker-0"` |
 | `--dns 8.8.8.8` | `dns=["8.8.8.8"]` |
@@ -279,7 +340,6 @@ Install: `pip install agentdocker-lite` provides the `adl` command.
 | `--gpus all` | `devices=["/dev/nvidia0", ...]` |
 | `--security-opt seccomp=...` | `seccomp=True` (default) |
 | `--cpuset-cpus 0-3` | `cpuset_cpus="0-3"` |
-| `docker compose up -d` | `ComposeProject("docker-compose.yml").up()` |
 | `docker compose down` | `proj.down()` |
 | `docker ps` | `adl ps` |
 | `docker kill <id>` | `adl kill <name>` |
@@ -312,8 +372,9 @@ Host kernel (shared)
 ## Examples
 
 ```bash
-python examples/basic_usage.py     # Full feature demo
-python examples/benchmark.py       # Performance comparison vs Docker
+python examples/basic_usage.py      # Full feature demo
+python examples/bench_swebench.py   # SWE-bench-style Docker vs adl comparison
+python examples/benchmark.py        # Full performance comparison (all backends)
 ```
 
 See [docs/quick_start.md](docs/quick_start.md) for detailed usage guide.

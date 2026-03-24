@@ -91,10 +91,10 @@ sb.stop_background(handle)
 ```python
 config = SandboxConfig(
     image="ubuntu:22.04",
-    cpu_max="50000 100000",    # 50% of one CPU
+    cpu_max="0.5",             # 50% of one CPU (also: "2" for 2 cores, "50%")
     memory_max="512m",         # 512MB (also accepts "2g", "536870912")
     pids_max="256",
-    io_max="/dev/sda 10485760",  # 10MB/s write limit
+    io_max="/dev/sda 10mb",    # 10MB/s write limit (also: "rbps=5mb wbps=10mb")
     cpuset_cpus="0-3",           # pin to CPU 0-3
     oom_score_adj=500,           # prefer killing sandbox over host processes
 )
@@ -459,9 +459,9 @@ python examples/benchmark.py
 | `-v /host:/container:rw` | `volumes=["/host:/container:rw"]` |
 | *(no equivalent)* | `volumes=["/host:/container:cow"]` |
 | `--memory 512m` | `memory_max="512m"` |
-| `--cpus 0.5` | `cpu_max="50000 100000"` |
+| `--cpus 0.5` | `cpu_max="0.5"` |
 | `--pids-limit 256` | `pids_max="256"` |
-| `--device-write-bps /dev/sda:10mb` | `io_max="/dev/sda 10485760"` |
+| `--device-write-bps /dev/sda:10mb` | `io_max="/dev/sda 10mb"` |
 | `--hostname worker-0` | `hostname="worker-0"` |
 | `--dns 8.8.8.8` | `dns=["8.8.8.8"]` |
 | `--read-only` | `read_only=True` |
@@ -479,6 +479,52 @@ python examples/benchmark.py
 | `--oom-score-adj 500` | `oom_score_adj=500` |
 | `docker compose up -d` | `ComposeProject("docker-compose.yml").up()` |
 | `docker compose down` | `proj.down()` |
+
+## Drop-in Docker migration
+
+Instead of manually translating parameters, paste your existing Docker invocation directly:
+
+### `SandboxConfig.from_docker()` — Docker Python SDK
+
+Accepts the same keyword arguments as `docker.containers.run()`:
+
+```python
+from agentdocker_lite import Sandbox, SandboxConfig
+
+# Before (Docker SDK):
+# c = client.containers.run("python:3.11", cpus=0.5, mem_limit="512m",
+#     volumes={"/data": {"bind": "/data", "mode": "ro"}},
+#     ports={"80/tcp": 8080}, hostname="worker", detach=True)
+
+# After (agentdocker-lite) — same kwargs:
+sb = Sandbox(SandboxConfig.from_docker(
+    "python:3.11",
+    cpus=0.5,
+    mem_limit="512m",
+    volumes={"/data": {"bind": "/data", "mode": "ro"}},
+    ports={"80/tcp": 8080},
+    hostname="worker",
+))
+sb.run("echo hello")
+sb.delete()
+```
+
+Supported parameters: `cpus`, `mem_limit`, `pids_limit`, `volumes` (dict or list), `ports` (dict or list), `environment` (dict or list), `hostname`, `dns`, `read_only`, `working_dir`, `devices`, `network_mode`, `tty`, `security_opt`, `privileged`, `oom_score_adj`, `cpuset_cpus`. Unsupported parameters are logged as warnings and ignored.
+
+### `SandboxConfig.from_docker_run()` — CLI command string
+
+Parses a `docker run` command line:
+
+```python
+sb = Sandbox(SandboxConfig.from_docker_run(
+    "docker run --cpus=0.5 -m 512m -v /data:/data:ro "
+    "-p 8080:80 -e APP=prod --hostname worker "
+    "--read-only python:3.11"
+))
+sb.run("echo hello")
+```
+
+Handles `sudo docker run`, combined flags (`-dit`), `--key=value` and `--key value` styles, and silently ignores unsupported flags like `-d`, `--rm`, `--name`.
 
 ## Docker Compose compatibility
 

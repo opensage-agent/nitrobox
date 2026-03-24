@@ -7,4 +7,5 @@ build/
 .venv/
 .idea/
 dev/
+site/
 uv.lock

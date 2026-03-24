@@ -6,7 +6,42 @@ based on whether the process is running as root.
 
 from __future__ import annotations
 
+import logging
+
 from agentdocker_lite.backends.base import SandboxBase, SandboxConfig
+
+logger = logging.getLogger(__name__)
+
+
+def _apply_image_defaults(config: SandboxConfig) -> None:
+    """Fill unset config fields from the OCI image config.
+
+    User-specified values always take precedence.  Only ``working_dir``
+    and ``environment`` are backfilled; ``cmd`` / ``entrypoint`` are not
+    applied here because sandbox commands are passed per-call via
+    ``run()``.
+    """
+    if not config.image:
+        return
+    from agentdocker_lite.rootfs import get_image_config
+
+    img_cfg = get_image_config(config.image)
+    if not img_cfg:
+        return
+
+    # working_dir: backfill only if user left the default "/"
+    img_wd = img_cfg.get("working_dir")
+    if img_wd and config.working_dir == "/":
+        config.working_dir = img_wd
+        logger.debug("Applied image WORKDIR: %s", img_wd)
+
+    # environment: image env as base, user env overrides
+    img_env = img_cfg.get("env") or {}
+    if img_env:
+        merged = dict(img_env)
+        merged.update(config.environment)  # user wins
+        config.environment = merged
+        logger.debug("Merged %d image ENV vars", len(img_env))
 
 
 def Sandbox(config: SandboxConfig, name: str = "default") -> SandboxBase:
@@ -16,6 +51,9 @@ def Sandbox(config: SandboxConfig, name: str = "default") -> SandboxBase:
     operations.  Otherwise, creates a RootlessSandbox that uses user
     namespaces for the same isolation without root (requires kernel >= 5.11).
 
+    Automatically applies OCI image defaults (``WORKDIR``, ``ENV``) from
+    the image config.  User-specified values always take precedence.
+
     Args:
         config: Sandbox configuration.
         name: Unique name for this sandbox instance.
@@ -24,6 +62,8 @@ def Sandbox(config: SandboxConfig, name: str = "default") -> SandboxBase:
         A sandbox instance (RootfulSandbox or RootlessSandbox).
     """
     import os
+
+    _apply_image_defaults(config)
 
     if os.geteuid() == 0:
         from agentdocker_lite.backends.rootful import RootfulSandbox

@@ -1,0 +1,46 @@
+site_name: agentdocker-lite
+site_description: Lightweight Linux namespace sandbox with persistent shell and instant reset
+site_url: https://opensage-agent.github.io/agentdocker-lite/
+repo_url: https://github.com/opensage-agent/agentdocker-lite
+repo_name: opensage-agent/agentdocker-lite
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: deep purple
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep purple
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+
+nav:
+  - Home: index.md
+  - Quick Start: quick_start.md
+  - Development: development.md
+  - SkyRL Integration: skyrl_integration_test.md
+  - Userns Fixes: userns_skyrl_fixes.md
+  - Improving: improve.md
+
+hooks:
+  - docs/hooks/fix_links.py
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - admonition
+  - toc:
+      permalink: true

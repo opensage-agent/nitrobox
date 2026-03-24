@@ -1256,6 +1256,295 @@ class TestReadOnly:
 # ------------------------------------------------------------------ #
 
 
+class TestParseCpuMax:
+    """Unit tests for _parse_cpu_max sugar."""
+
+    def test_fraction(self):
+        from agentdocker_lite.backends.base import _parse_cpu_max
+        assert _parse_cpu_max("0.5") == "50000 100000"
+
+    def test_integer_cores(self):
+        from agentdocker_lite.backends.base import _parse_cpu_max
+        assert _parse_cpu_max("2") == "200000 100000"
+
+    def test_percentage(self):
+        from agentdocker_lite.backends.base import _parse_cpu_max
+        assert _parse_cpu_max("50%") == "50000 100000"
+
+    def test_passthrough_raw(self):
+        from agentdocker_lite.backends.base import _parse_cpu_max
+        assert _parse_cpu_max("50000 100000") == "50000 100000"
+
+    def test_small_fraction(self):
+        from agentdocker_lite.backends.base import _parse_cpu_max
+        result = _parse_cpu_max("0.01")
+        quota, period = result.split()
+        assert int(quota) >= 1
+        assert period == "100000"
+
+    def test_config_applies(self):
+        """SandboxConfig.__post_init__ converts friendly cpu_max."""
+        cfg = SandboxConfig(image="x", cpu_max="0.5")
+        assert cfg.cpu_max == "50000 100000"
+
+
+class TestParseIoMax:
+    """Unit tests for _parse_io_max sugar."""
+
+    def test_bare_size(self):
+        from agentdocker_lite.backends.base import _parse_io_max
+        # /dev/xxx won't resolve on CI, but MAJ:MIN passthrough works
+        result = _parse_io_max("259:0 10mb")
+        assert result == "259:0 wbps=10485760"
+
+    def test_keyed_size(self):
+        from agentdocker_lite.backends.base import _parse_io_max
+        result = _parse_io_max("259:0 wbps=10mb")
+        assert result == "259:0 wbps=10485760"
+
+    def test_multiple_params(self):
+        from agentdocker_lite.backends.base import _parse_io_max
+        result = _parse_io_max("259:0 rbps=5mb wbps=10mb")
+        assert "rbps=5242880" in result
+        assert "wbps=10485760" in result
+
+    def test_passthrough_raw(self):
+        from agentdocker_lite.backends.base import _parse_io_max
+        raw = "259:0 wbps=10485760"
+        assert _parse_io_max(raw) == raw
+
+    def test_config_applies(self):
+        """SandboxConfig.__post_init__ converts friendly io_max."""
+        cfg = SandboxConfig(image="x", io_max="259:0 10mb")
+        assert cfg.io_max == "259:0 wbps=10485760"
+
+
+class TestApplyImageDefaults:
+    """Unit tests for _apply_image_defaults (image config backfill)."""
+
+    def test_backfill_workdir(self, monkeypatch):
+        from agentdocker_lite.sandbox import _apply_image_defaults
+        monkeypatch.setattr(
+            "agentdocker_lite.rootfs.get_image_config",
+            lambda _img: {"working_dir": "/app", "env": {}, "cmd": None,
+                          "entrypoint": None, "exposed_ports": []},
+        )
+        cfg = SandboxConfig(image="myimg")
+        _apply_image_defaults(cfg)
+        assert cfg.working_dir == "/app"
+
+    def test_user_workdir_wins(self, monkeypatch):
+        from agentdocker_lite.sandbox import _apply_image_defaults
+        monkeypatch.setattr(
+            "agentdocker_lite.rootfs.get_image_config",
+            lambda _img: {"working_dir": "/app", "env": {}, "cmd": None,
+                          "entrypoint": None, "exposed_ports": []},
+        )
+        cfg = SandboxConfig(image="myimg", working_dir="/custom")
+        _apply_image_defaults(cfg)
+        assert cfg.working_dir == "/custom"
+
+    def test_backfill_env(self, monkeypatch):
+        from agentdocker_lite.sandbox import _apply_image_defaults
+        monkeypatch.setattr(
+            "agentdocker_lite.rootfs.get_image_config",
+            lambda _img: {"working_dir": None, "env": {"A": "1", "B": "2"},
+                          "cmd": None, "entrypoint": None, "exposed_ports": []},
+        )
+        cfg = SandboxConfig(image="myimg", environment={"B": "override"})
+        _apply_image_defaults(cfg)
+        assert cfg.environment["A"] == "1"
+        assert cfg.environment["B"] == "override"
+
+    def test_no_image_config(self, monkeypatch):
+        from agentdocker_lite.sandbox import _apply_image_defaults
+        monkeypatch.setattr(
+            "agentdocker_lite.rootfs.get_image_config",
+            lambda _img: None,
+        )
+        cfg = SandboxConfig(image="myimg")
+        _apply_image_defaults(cfg)
+        assert cfg.working_dir == "/"
+        assert cfg.environment == {}
+
+    def test_no_image(self):
+        from agentdocker_lite.sandbox import _apply_image_defaults
+        cfg = SandboxConfig()
+        _apply_image_defaults(cfg)
+        assert cfg.working_dir == "/"
+
+
+class TestFromDocker:
+    """Unit tests for SandboxConfig.from_docker()."""
+
+    def test_basic(self):
+        cfg = SandboxConfig.from_docker("ubuntu:22.04", cpus=0.5, mem_limit="512m")
+        assert cfg.image == "ubuntu:22.04"
+        assert cfg.cpu_max == "50000 100000"
+        assert cfg.memory_max == str(512 * 1024**2)
+
+    def test_volumes_dict(self):
+        cfg = SandboxConfig.from_docker("img", volumes={
+            "/host": {"bind": "/container", "mode": "ro"},
+        })
+        assert cfg.volumes == ["/host:/container:ro"]
+
+    def test_volumes_list(self):
+        cfg = SandboxConfig.from_docker("img", volumes=["/a:/b:rw"])
+        assert cfg.volumes == ["/a:/b:rw"]
+
+    def test_ports_dict(self):
+        cfg = SandboxConfig.from_docker("img", ports={"80/tcp": 8080, "443/tcp": 8443})
+        assert "8080:80" in cfg.port_map
+        assert "8443:443" in cfg.port_map
+
+    def test_ports_multi(self):
+        cfg = SandboxConfig.from_docker("img", ports={"80/tcp": [8080, 9090]})
+        assert "8080:80" in cfg.port_map
+        assert "9090:80" in cfg.port_map
+
+    def test_env_dict(self):
+        cfg = SandboxConfig.from_docker("img", environment={"A": "1"})
+        assert cfg.environment == {"A": "1"}
+
+    def test_env_list(self):
+        cfg = SandboxConfig.from_docker("img", environment=["A=1", "B=2"])
+        assert cfg.environment == {"A": "1", "B": "2"}
+
+    def test_network_none(self):
+        cfg = SandboxConfig.from_docker("img", network_mode="none")
+        assert cfg.net_isolate is True
+
+    def test_hostname_dns(self):
+        cfg = SandboxConfig.from_docker("img", hostname="web", dns=["8.8.8.8"])
+        assert cfg.hostname == "web"
+        assert cfg.dns == ["8.8.8.8"]
+
+    def test_devices(self):
+        cfg = SandboxConfig.from_docker("img", devices=["/dev/kvm:/dev/kvm:rwm"])
+        assert cfg.devices == ["/dev/kvm"]
+
+    def test_read_only(self):
+        cfg = SandboxConfig.from_docker("img", read_only=True)
+        assert cfg.read_only is True
+
+    def test_privileged_disables_seccomp(self):
+        cfg = SandboxConfig.from_docker("img", privileged=True)
+        assert cfg.seccomp is False
+
+    def test_pids_limit(self):
+        cfg = SandboxConfig.from_docker("img", pids_limit=256)
+        assert cfg.pids_max == "256"
+
+    def test_ignored_params_no_error(self):
+        cfg = SandboxConfig.from_docker("img", detach=True, remove=True,
+                                        labels={"k": "v"}, name="foo")
+        assert cfg.image == "img"
+
+    def test_full_combo(self):
+        """Docker SDK style with many params at once."""
+        cfg = SandboxConfig.from_docker(
+            "python:3.11-slim",
+            cpus=2, mem_limit="1g", pids_limit=512,
+            volumes={"/data": {"bind": "/data", "mode": "ro"}},
+            ports={"80/tcp": 8080},
+            environment={"APP_ENV": "prod"},
+            hostname="worker",
+            dns=["8.8.8.8", "1.1.1.1"],
+            read_only=True,
+            working_dir="/app",
+        )
+        assert cfg.image == "python:3.11-slim"
+        assert cfg.cpu_max == "200000 100000"
+        assert cfg.memory_max == str(1024**3)
+        assert cfg.pids_max == "512"
+        assert cfg.volumes == ["/data:/data:ro"]
+        assert cfg.port_map == ["8080:80"]
+        assert cfg.environment == {"APP_ENV": "prod"}
+        assert cfg.hostname == "worker"
+        assert cfg.dns == ["8.8.8.8", "1.1.1.1"]
+        assert cfg.read_only is True
+        assert cfg.working_dir == "/app"
+
+
+class TestFromDockerRun:
+    """Unit tests for SandboxConfig.from_docker_run()."""
+
+    def test_basic(self):
+        cfg = SandboxConfig.from_docker_run("docker run --cpus=0.5 -m 512m ubuntu:22.04")
+        assert cfg.image == "ubuntu:22.04"
+        assert cfg.cpu_max == "50000 100000"
+        assert cfg.memory_max == str(512 * 1024**2)
+
+    def test_volumes_and_ports(self):
+        cfg = SandboxConfig.from_docker_run(
+            "docker run -v /data:/data:ro -p 8080:80 nginx"
+        )
+        assert cfg.volumes == ["/data:/data:ro"]
+        assert cfg.port_map == ["8080:80"]
+
+    def test_env_and_hostname(self):
+        cfg = SandboxConfig.from_docker_run(
+            "docker run -e APP=prod -h worker python:3.11"
+        )
+        assert cfg.environment == {"APP": "prod"}
+        assert cfg.hostname == "worker"
+
+    def test_workdir_and_readonly(self):
+        cfg = SandboxConfig.from_docker_run(
+            "docker run -w /app --read-only ubuntu"
+        )
+        assert cfg.working_dir == "/app"
+        assert cfg.read_only is True
+
+    def test_network_none(self):
+        cfg = SandboxConfig.from_docker_run("docker run --network none alpine")
+        assert cfg.net_isolate is True
+
+    def test_dns_and_device(self):
+        cfg = SandboxConfig.from_docker_run(
+            "docker run --dns 8.8.8.8 --device /dev/kvm:/dev/kvm:rwm ubuntu"
+        )
+        assert cfg.dns == ["8.8.8.8"]
+        assert cfg.devices == ["/dev/kvm"]
+
+    def test_strips_sudo_and_flags(self):
+        cfg = SandboxConfig.from_docker_run("sudo docker run -d --rm -it ubuntu bash")
+        assert cfg.image == "ubuntu"
+
+    def test_long_form_flags(self):
+        cfg = SandboxConfig.from_docker_run(
+            "docker run --memory=1g --hostname=web --workdir=/srv nginx:latest"
+        )
+        assert cfg.memory_max == str(1024**3)
+        assert cfg.hostname == "web"
+        assert cfg.working_dir == "/srv"
+        assert cfg.image == "nginx:latest"
+
+    def test_no_image_raises(self):
+        with pytest.raises(ValueError, match="No image found"):
+            SandboxConfig.from_docker_run("docker run -d")
+
+    def test_full_combo(self):
+        cfg = SandboxConfig.from_docker_run(
+            "docker run --cpus=2 -m 1g --pids-limit 512 "
+            "-v /data:/data:ro -p 8080:80 -e APP_ENV=prod "
+            "--hostname worker --dns 8.8.8.8 --read-only "
+            "-w /app python:3.11-slim"
+        )
+        assert cfg.image == "python:3.11-slim"
+        assert cfg.cpu_max == "200000 100000"
+        assert cfg.memory_max == str(1024**3)
+        assert cfg.pids_max == "512"
+        assert cfg.volumes == ["/data:/data:ro"]
+        assert cfg.port_map == ["8080:80"]
+        assert cfg.environment == {"APP_ENV": "prod"}
+        assert cfg.hostname == "worker"
+        assert cfg.dns == ["8.8.8.8"]
+        assert cfg.read_only is True
+        assert cfg.working_dir == "/app"
+
+
 class TestGetImageConfig:
     def test_basic(self):
         """get_image_config returns cmd, entrypoint, env, working_dir."""
