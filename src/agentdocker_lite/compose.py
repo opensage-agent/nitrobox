@@ -511,6 +511,7 @@ class ComposeProject:
         self._startup_order = _topo_sort(self._defs)
         self._image_map = self._resolve_image_map()
         self._image_cmds: dict[str, list[str] | None] = {}  # service → image CMD
+        self._image_entrypoints: dict[str, list[str] | None] = {}  # service → image ENTRYPOINT
         self._sandboxes: dict[str, Sandbox] = {}
         self._bg_handles: dict[str, str] = {}  # service → bg handle
         self._volume_dir: Optional[Path] = None
@@ -759,10 +760,11 @@ class ComposeProject:
         """Create a Sandbox for a single compose service."""
         image = self._resolve_image(svc)
 
-        # Fetch image config for CMD fallback (used by _cmd_string)
+        # Fetch image config for entrypoint+CMD (used by _cmd_string)
         from agentdocker_lite.rootfs import get_image_config
         img_cfg = get_image_config(image) or {}
         self._image_cmds[svc.name] = img_cfg.get("cmd")
+        self._image_entrypoints[svc.name] = img_cfg.get("entrypoint")
 
         volumes = self._resolve_volumes(svc)
 
@@ -829,11 +831,12 @@ class ComposeProject:
             caps = list(CAP_NAME_TO_NUM.keys())
         if caps:
             config_kwargs["cap_add"] = caps
-        if svc.entrypoint:
-            ep = svc.entrypoint
-            if isinstance(ep, str):
-                ep = ["sh", "-c", ep]
-            config_kwargs["entrypoint"] = list(ep)
+        # Don't use entrypoint as shell wrapper — run entrypoint+CMD
+        # together as a background process in _cmd_string().  This avoids
+        # passing unexpected args to non-wrapper entrypoints
+        # (e.g. ENTRYPOINT ["python", "app.py"]).
+        # Setting [] prevents _apply_image_defaults from backfilling.
+        config_kwargs["entrypoint"] = []
         if self._env_base_dir:
             config_kwargs["env_base_dir"] = self._env_base_dir
         if self._rootfs_cache_dir:
@@ -858,19 +861,29 @@ class ComposeProject:
     def _cmd_string(self, svc: _Service) -> Optional[str]:
         """Build the shell command to start a service.
 
-        Uses compose ``command:`` if set, otherwise falls back to the
-        image's default ``CMD``.  The entrypoint is NOT included here
-        — it already runs at sandbox startup as the shell wrapper.
+        Combines entrypoint and command, matching Docker semantics:
+        ``ENTRYPOINT + CMD``.  Compose fields override image defaults.
+        Both run together as a single background process — the
+        entrypoint is NOT used as a shell wrapper.
         """
+        # Resolve entrypoint: compose > image
+        ep = svc.entrypoint
+        if ep is None:
+            ep = self._image_entrypoints.get(svc.name)
+
+        # Resolve command: compose > image CMD
         cmd = svc.command
         if cmd is None:
-            # Fall back to image's default CMD
             cmd = self._image_cmds.get(svc.name)
-        if cmd is None:
-            return None
-        if isinstance(cmd, list):
-            return shlex.join(cmd)
-        return str(cmd)
+
+        # Combine entrypoint + cmd
+        parts: list[str] = []
+        if ep:
+            parts.append(shlex.join(ep) if isinstance(ep, list) else str(ep))
+        if cmd:
+            parts.append(shlex.join(cmd) if isinstance(cmd, list) else str(cmd))
+
+        return " ".join(parts) if parts else None
 
     @staticmethod
     def _ulimit_prefix(ulimits: dict[str, tuple[int, int]]) -> str:
