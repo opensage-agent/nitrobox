@@ -272,9 +272,9 @@ class CheckpointManager:
 
         # 2. Identify target process.
         shell = self._sandbox._persistent_shell
-        if shell._process is None or shell._process.poll() is not None:
+        if not shell.alive:
             raise RuntimeError("Sandbox shell is not running")
-        shell_pid = shell._process.pid
+        shell_pid = shell.pid
         init_pid = _find_init_pid(shell_pid)
 
         # 3. Save pipe descriptors (runc approach: readlink fd 0/1/2).
@@ -571,20 +571,15 @@ class CheckpointManager:
         shell._signal_r = signal_r
         shell._signal_fd = signal_fd_num
 
+        shell.pid = restored_pid
         if use_tty:
             shell._master_fd = master_fd
-            shell._process = _RestoredProcess(  # type: ignore[assignment]
-                pid=restored_pid,
-                stdin_fd=-1,
-                stdout_fd=-1,
-            )
+            shell._stdin_fd = master_fd
+            shell._stdout_fd = master_fd
         else:
             shell._master_fd = None
-            shell._process = _RestoredProcess(  # type: ignore[assignment]
-                pid=restored_pid,
-                stdin_fd=stdin_w,
-                stdout_fd=stdout_r,
-            )
+            shell._stdin_fd = stdin_w
+            shell._stdout_fd = stdout_r
 
         if hasattr(self._sandbox, "_bg_handles"):
             self._sandbox._bg_handles.clear()

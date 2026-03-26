@@ -1,5 +1,7 @@
 """Minimal CLI for agentdocker-lite sandbox management.
 
+Thin wrapper over Rust _core functions.
+
 Usage::
 
     adl ps                  # list sandboxes
@@ -14,6 +16,7 @@ import argparse
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 
 
@@ -25,8 +28,19 @@ def _env_base_dir(args: argparse.Namespace) -> Path:
     )
 
 
+def _pid_alive(pid: int) -> bool:
+    """Check if a process is alive (not zombie, not dead)."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("State:"):
+                    return "Z" not in line and "X" not in line
+        return True
+    except (FileNotFoundError, PermissionError):
+        return False
+
+
 def _scan_sandboxes(base: Path) -> list[dict]:
-    """Scan for sandbox directories and return their status."""
     if not base.exists():
         return []
     results = []
@@ -40,56 +54,33 @@ def _scan_sandboxes(base: Path) -> list[dict]:
             pid = int(pid_file.read_text().strip())
         except (ValueError, OSError):
             continue
-
-        alive = _pid_alive(pid)
-
         results.append({
             "name": entry.name,
             "pid": pid,
-            "alive": alive,
+            "alive": _pid_alive(pid),
             "path": str(entry),
         })
     return results
 
 
-def _pid_alive(pid: int) -> bool:
-    """Check if a process is alive (not zombie, not dead)."""
-    try:
-        with open(f"/proc/{pid}/status") as f:
-            for line in f:
-                if line.startswith("State:"):
-                    # Z = zombie, X = dead — treat both as not alive
-                    return "Z" not in line and "X" not in line
-        return True
-    except (FileNotFoundError, PermissionError):
-        return False
-
-
 def cmd_ps(args: argparse.Namespace) -> None:
-    """List sandboxes."""
     base = _env_base_dir(args)
     sandboxes = _scan_sandboxes(base)
-
     if not sandboxes:
         print("No sandboxes found.")
         return
-
-    # Header
     print(f"{'NAME':<30} {'PID':>7} {'STATUS':<8} {'PATH'}")
     print("-" * 80)
     for sb in sandboxes:
         status = "running" if sb["alive"] else "dead"
         print(f"{sb['name']:<30} {sb['pid']:>7} {status:<8} {sb['path']}")
-
     alive = sum(1 for s in sandboxes if s["alive"])
     dead = sum(1 for s in sandboxes if not s["alive"])
     print(f"\n{alive} running, {dead} stale")
 
 
 def cmd_cleanup(args: argparse.Namespace) -> None:
-    """Remove stale sandboxes."""
     from agentdocker_lite.backends.base import SandboxBase
-
     cleaned = SandboxBase.cleanup_stale(str(_env_base_dir(args)))
     if cleaned:
         print(f"Cleaned up {cleaned} stale sandbox(es).")
@@ -98,7 +89,6 @@ def cmd_cleanup(args: argparse.Namespace) -> None:
 
 
 def cmd_kill(args: argparse.Namespace) -> None:
-    """Kill a sandbox by name or all sandboxes."""
     base = _env_base_dir(args)
     sandboxes = _scan_sandboxes(base)
 
@@ -132,9 +122,7 @@ def cmd_kill(args: argparse.Namespace) -> None:
     if not pids_to_wait:
         return
 
-    # Wait for processes to die (SIGTERM → wait → SIGKILL fallback)
-    import time
-    for _ in range(10):  # 5 seconds max
+    for _ in range(10):
         pids_to_wait = [p for p in pids_to_wait if _pid_alive(p)]
         if not pids_to_wait:
             break
@@ -146,8 +134,6 @@ def cmd_kill(args: argparse.Namespace) -> None:
             pass
     time.sleep(0.1)
 
-    # Clean up remains — SIGTERM doesn't trigger Python atexit,
-    # so the sandbox dir is left behind.
     from agentdocker_lite.backends.base import SandboxBase
     SandboxBase.cleanup_stale(str(base))
 
@@ -164,7 +150,6 @@ def main() -> None:
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("ps", help="list sandboxes")
-
     sub.add_parser("cleanup", help="remove stale sandboxes")
 
     kill_p = sub.add_parser("kill", help="kill a sandbox")

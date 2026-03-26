@@ -1,38 +1,30 @@
-"""Persistent shell process for agentdocker-lite sandboxes."""
+"""Persistent shell process for agentdocker-lite sandboxes.
+
+Spawns a shell inside a Linux namespace sandbox via Rust _core.spawn_sandbox(),
+then communicates with it via stdin/stdout pipes and a signal fd protocol.
+"""
 
 from __future__ import annotations
 
 import errno
 import logging
 import os
-import pty as pty_mod
 import select
 import shlex
-import subprocess
-import termios
 import threading
 import time
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Docker-default masked/readonly paths are hardcoded in the adl-seccomp
-# static binary (_vendor/adl-seccomp.c) which applies them before exec.
-
 
 class _PersistentShell:
-    """Persistent shell process inside a Linux namespace with chroot.
+    """Persistent shell inside a Linux namespace with chroot/pivot_root.
 
     Instead of ``fork -> exec chroot -> exec bash -> exec cmd`` per command
     (~330 ms each), this keeps a single long-lived bash process.  Commands
     are piped through stdin and output is collected via a separate signaling
     fd to avoid sentinel collision with command output.
-
-    Namespace flags (via ``unshare``):
-
-    * ``--pid``   -- PID namespace
-    * ``--mount`` -- mount namespace
-    * ``--fork``  -- child becomes PID 1 in the new PID namespace
     """
 
     def __init__(
@@ -46,14 +38,35 @@ class _PersistentShell:
         net_isolate: bool = False,
         net_ns: Optional[str] = None,
         seccomp: bool = True,
-        userns_setup_script: Optional[str] = None,
-        systemd_scope_properties: Optional[list[str]] = None,
         hostname: Optional[str] = None,
         read_only: bool = False,
         entrypoint: Optional[list[str]] = None,
         subuid_range: Optional[tuple[int, int, int]] = None,
         shared_userns: Optional[str] = None,
         ulimits: Optional[dict[str, tuple[int, int]]] = None,
+        # Rootful mode (pivot_root) vs rootless (chroot)
+        rootful: bool = False,
+        # Overlay config (rootless)
+        lowerdir_spec: Optional[str] = None,
+        upper_dir: Optional[str] = None,
+        work_dir: Optional[str] = None,
+        # Volumes, devices, tmpfs
+        volumes: Optional[list[str]] = None,
+        devices: Optional[list[str]] = None,
+        shm_size: Optional[int] = None,
+        tmpfs_mounts: Optional[list[str]] = None,
+        # Security
+        cap_add: Optional[list[int]] = None,
+        landlock_read_paths: Optional[list[str]] = None,
+        landlock_write_paths: Optional[list[str]] = None,
+        landlock_ports: Optional[list[int]] = None,
+        landlock_strict: bool = False,
+        # Port mapping
+        port_map: Optional[list[str]] = None,
+        pasta_bin: Optional[str] = None,
+        ipv6: bool = False,
+        # Internal
+        env_dir: Optional[str] = None,
     ):
         self._rootfs = rootfs
         self._shell = shell
@@ -64,298 +77,107 @@ class _PersistentShell:
         self._net_isolate = net_isolate
         self._net_ns = net_ns
         self._seccomp = seccomp
-        self._userns = userns_setup_script is not None
-        self._userns_setup_script = userns_setup_script
-        self._systemd_scope_properties = systemd_scope_properties
         self._hostname = hostname
-        self._entrypoint = entrypoint
         self._read_only = read_only
-        self._subuid_range = subuid_range  # (outer_id, sub_start, sub_count) or None
-        self._shared_userns = shared_userns  # path to existing userns to join
+        self._entrypoint = entrypoint or []
+        self._subuid_range = subuid_range
+        self._shared_userns = shared_userns
         self._ulimits = ulimits or {}
-        self._process: Optional[subprocess.Popen] = None
+        self._rootful = rootful
+        self._lowerdir_spec = lowerdir_spec
+        self._upper_dir = upper_dir
+        self._work_dir = work_dir
+        self._volumes = volumes or []
+        self._devices = devices or []
+        self._shm_size = shm_size
+        self._tmpfs_mounts = tmpfs_mounts or []
+        self._cap_add = cap_add or []
+        self._landlock_read_paths = landlock_read_paths or []
+        self._landlock_write_paths = landlock_write_paths or []
+        self._landlock_ports = landlock_ports or []
+        self._landlock_strict = landlock_strict
+        self._port_map = port_map or []
+        self._pasta_bin = pasta_bin
+        self._ipv6 = ipv6
+        self._env_dir = env_dir
+
+        # Process state (set by start())
+        self.pid: Optional[int] = None
         self._pidfd: Optional[int] = None
+        self._stdin_fd: Optional[int] = None
+        self._stdout_fd: Optional[int] = None
+        self._signal_r: Optional[int] = None
+        self._signal_fd: Optional[int] = None  # signal_w fd num inside child
         self._master_fd: Optional[int] = None
         self._lock = threading.Lock()
-        self._signal_r: Optional[int] = None
-        self._signal_w: Optional[int] = None
+
         self.start()
 
     # -- lifecycle --------------------------------------------------------- #
 
     def start(self) -> None:
         """Start (or restart) the persistent shell inside a new namespace."""
-        if self._process and self._process.poll() is None:
+        if self.pid is not None and self.alive:
             self.kill()
 
-        # Create signal pipe for command completion signaling.
-        # The child writes its exit code to signal_w; we read from signal_r.
-        signal_r, signal_w = os.pipe()
-        self._signal_r = signal_r
-        self._signal_fd = signal_w  # Remember fd number for bash scripts
+        from agentdocker_lite._core import py_spawn_sandbox
 
-        if self._userns and self._shared_userns:
-            # Shared userns mode: enter an existing user namespace (and
-            # optionally its netns) via nsenter, then create own mount/pid
-            # namespaces.  No newuidmap needed — the sentinel already has
-            # the uid mapping.  The kernel allows the userns creator to
-            # nsenter from the parent userns (cap_capable owner check).
-            nsenter_cmd: list[str] = [
-                "nsenter",
-                f"--user={self._shared_userns}",
-            ]
-            if self._net_ns:
-                nsenter_cmd.append(f"--net={self._net_ns}")
-            nsenter_cmd.extend([
-                "--", "unshare",
-                "--pid", "--mount", "--propagation", "slave",
-                "--uts", "--ipc",
-                "--fork", "bash", str(self._userns_setup_script),
-            ])
-            self._sync_fds = None
+        config = {
+            "rootfs": str(self._rootfs),
+            "shell": self._shell,
+            "working_dir": self._working_dir,
+            "env": self._env,
+            "rootful": self._rootful,
+            "userns": self._subuid_range is not None
+            or self._shared_userns is not None
+            or (not self._rootful),
+            "net_isolate": self._net_isolate,
+            "net_ns": self._net_ns,
+            "shared_userns": self._shared_userns,
+            "map_root_user": self._subuid_range is None
+            and self._shared_userns is None
+            and not self._rootful,
+            "subuid_range": self._subuid_range,
+            "seccomp": self._seccomp,
+            "cap_add": self._cap_add,
+            "hostname": self._hostname,
+            "read_only": self._read_only,
+            "entrypoint": self._entrypoint,
+            "tty": self._tty,
+            "lowerdir_spec": self._lowerdir_spec,
+            "upper_dir": self._upper_dir,
+            "work_dir": self._work_dir,
+            "volumes": self._volumes,
+            "devices": self._devices,
+            "shm_size": self._shm_size,
+            "tmpfs_mounts": self._tmpfs_mounts,
+            "landlock_read_paths": self._landlock_read_paths,
+            "landlock_write_paths": self._landlock_write_paths,
+            "landlock_ports": self._landlock_ports,
+            "landlock_strict": self._landlock_strict,
+            "cgroup_path": str(self._cgroup_path) if self._cgroup_path else None,
+            "port_map": self._port_map,
+            "pasta_bin": self._pasta_bin,
+            "ipv6": self._ipv6,
+            "env_dir": self._env_dir,
+        }
 
-            if self._systemd_scope_properties:
-                cmd: list[str] = ["systemd-run", "--user", "--scope", "--quiet"]
-                for prop in self._systemd_scope_properties:
-                    cmd.extend(["--property", prop])
-                cmd.append("--")
-                cmd.extend(nsenter_cmd)
-            else:
-                cmd = nsenter_cmd
+        result = py_spawn_sandbox(config)
 
-        elif self._userns:
-            # User namespace mode: setup script handles mount/chroot,
-            # stdin is used for phase 2 init (post-chroot).
-            use_full_mapping = self._subuid_range is not None
+        self.pid = result["pid"]
+        self._stdin_fd = result["stdin_fd"]
+        self._stdout_fd = result["stdout_fd"]
+        self._signal_r = result["signal_r_fd"]
+        self._signal_fd = result["signal_w_fd_num"]
+        self._master_fd = result.get("master_fd")
+        self._pidfd = result.get("pidfd")
 
-            unshare_cmd: list[str] = [
-                "unshare", "--user",
-            ]
-            if not use_full_mapping:
-                # Fallback: only map current uid → root (no apt-get, useradd, etc.)
-                unshare_cmd.append("--map-root-user")
+        if self._tty and self._master_fd is not None:
+            # In TTY mode, stdin and stdout go through master_fd
+            self._stdin_fd = self._master_fd
+            self._stdout_fd = self._master_fd
 
-            unshare_cmd.extend([
-                "--pid", "--mount", "--propagation", "slave",
-                "--uts", "--ipc",
-            ])
-            if self._net_ns:
-                unshare_cmd.append(f"--net={self._net_ns}")
-            elif self._net_isolate:
-                unshare_cmd.append("--net")
-
-            if use_full_mapping:
-                # With full uid mapping, we need synchronization:
-                # 1. Child starts in new user namespace (no mapping yet)
-                # 2. Child blocks on a sync pipe
-                # 3. Parent calls newuidmap/newgidmap to set full mapping
-                # 4. Parent signals child by closing the pipe
-                # 5. Child continues with setup script (mount, chroot, etc.)
-                sync_r, sync_w = os.pipe()
-                wrapper = (
-                    f"exec 3<&{sync_r}; exec {sync_r}<&-; "
-                    f"read -n1 <&3; exec 3<&-; "
-                    f"exec bash {shlex.quote(str(self._userns_setup_script))}"
-                )
-                unshare_cmd.extend(["--fork", "bash", "-c", wrapper])
-                self._sync_fds = (sync_r, sync_w)
-            else:
-                unshare_cmd.extend(["--fork", "bash", str(self._userns_setup_script)])
-                self._sync_fds = None
-
-            # Wrap in systemd-run --user --scope for cgroup delegation
-            if self._systemd_scope_properties:
-                cmd = ["systemd-run", "--user", "--scope", "--quiet"]
-                for prop in self._systemd_scope_properties:
-                    cmd.extend(["--property", prop])
-                cmd.append("--")
-                cmd.extend(unshare_cmd)
-            else:
-                cmd = unshare_cmd
-        else:
-            # Rootful mode: pivot_root into rootfs (CRIU-compatible).
-            # pivot_root changes the mount namespace root, unlike chroot
-            # which only changes the process root.  CRIU requires these
-            # to match for checkpoint/restore to work.
-            cmd = ["unshare", "--pid", "--mount", "--propagation", "slave",
-                   "--uts", "--ipc"]
-            # Time namespace for CRIU monotonic clock continuity.
-            self._timens = os.path.exists("/proc/self/ns/time")
-            if self._timens:
-                cmd.append("--time")
-            if self._net_isolate:
-                cmd.append("--net")
-            shell_exec = self._shell
-            if "bash" in self._shell:
-                shell_exec += " --norc --noprofile"
-            # OCI ENTRYPOINT: prepend to shell exec so entrypoint runs
-            # initialization, then `exec "$@"` hands off to the shell.
-            if self._entrypoint:
-                ep = " ".join(shlex.quote(a) for a in self._entrypoint)
-                shell_exec = f"{ep} {shell_exec}"
-
-            # Write seccomp BPF + static helper into rootfs BEFORE pivot_root.
-            if self._seccomp:
-                self._prepare_seccomp_helper()
-
-            # adl-seccomp (static binary) runs AFTER pivot_root and handles:
-            # mount /proc + /dev, cap drop, mask paths, readonly, seccomp, exec shell.
-            # All done inside the new root — no host tools or glibc needed.
-            rootfs_q = shlex.quote(str(self._rootfs))
-
-            # Hostname is set by adl-seccomp via sethostname() syscall
-            # (reads /tmp/.adl_hostname written by Python init/reset).
-
-            seccomp_wrap = "/tmp/.adl_seccomp " if self._seccomp else ""
-
-            # Mount isolation (defense in depth — runc approach):
-            # 1. mount --make-rslave / : allows host->child propagation
-            #    but blocks child->host propagation.  Safer than rprivate
-            #    which can race with concurrent mount events.
-            #    (see runc prepareRoot: MS_SLAVE|MS_REC)
-            # 2. mount --bind rootfs rootfs : self-bind creates a new
-            #    mount point with controllable propagation, independent
-            #    of the parent mount's shared subtrees.  Also ensures
-            #    rootfs is a mount point (required by pivot_root).
-            # 3. mount --make-private rootfs : ensure the rootfs mount
-            #    itself cannot propagate in either direction.
-            # 4. After pivot_root, /.pivot_old cleanup is done by
-            #    _cleanup_pivot_old (rslave + umount via setns).
-            pivot_script = (
-                "mount --make-rslave / && "
-                f"cd {rootfs_q} && "
-                "mkdir -p .pivot_old && "
-                "pivot_root . .pivot_old && "
-                "cd / && "
-                f"exec setsid {seccomp_wrap}{shell_exec}"
-            )
-            cmd.extend(["--fork", "bash", "-c", pivot_script])
-
-        # Build preexec_fn
-        _cg_path = self._cgroup_path
-
-        if self._userns:
-            # User namespace: no cgroup, no landlock in preexec.
-            def _preexec() -> None:
-                pass
-        else:
-            # Rootful: cgroup in preexec. seccomp applied via init script
-            # AFTER mount /proc + /dev (which need mount syscall to work first).
-            def _preexec() -> None:
-                if _cg_path:
-                    try:
-                        with open(_cg_path / "cgroup.procs", "w") as f:
-                            f.write(str(os.getpid()))
-                    except Exception:
-                        pass
-
-        preexec_fn = _preexec
-
-        # When systemd-run wraps the command, it needs host env
-        # (DBUS_SESSION_BUS_ADDRESS etc.) to talk to the user's systemd.
-        # The sandbox env is applied inside the chroot via the init_script.
-        popen_env = None if self._systemd_scope_properties else self._env
-
-        # Collect fds to pass to child
-        _pass_fds = [signal_w]
-        if self._userns and getattr(self, "_sync_fds", None):
-            _pass_fds.append(self._sync_fds[0])  # sync_r
-
-        if self._tty:
-            master_fd, slave_fd = pty_mod.openpty()
-            # Disable echo so input doesn't pollute output.
-            attrs = termios.tcgetattr(master_fd)
-            attrs[3] &= ~termios.ECHO  # lflags
-            termios.tcsetattr(master_fd, termios.TCSANOW, attrs)
-
-            self._process = subprocess.Popen(
-                cmd,
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                env=popen_env,
-                bufsize=0,
-                preexec_fn=preexec_fn,
-                pass_fds=tuple(_pass_fds),
-                start_new_session=True,
-            )
-            os.close(slave_fd)
-            self._master_fd = master_fd
-        else:
-            self._process = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                env=popen_env,
-                bufsize=0,
-                preexec_fn=preexec_fn,
-                pass_fds=tuple(_pass_fds),
-                start_new_session=True,
-            )
-
-        # Close write end in parent -- only the child should write to it.
-        os.close(signal_w)
-        self._signal_w = None
-
-        # Full uid/gid mapping via newuidmap/newgidmap
-        if self._userns and getattr(self, "_sync_fds", None):
-            sync_r, sync_w = self._sync_fds
-            os.close(sync_r)  # Close read end in parent
-
-            pid = self._process.pid
-            outer_uid, sub_start, sub_count = self._subuid_range
-
-            # Wait for the child to enter the new user namespace
-            my_userns = os.readlink("/proc/self/ns/user")
-            for _ in range(1000):  # 1000 * 1ms = 1s max
-                try:
-                    child_userns = os.readlink(f"/proc/{pid}/ns/user")
-                    if child_userns != my_userns:
-                        break
-                except (FileNotFoundError, PermissionError):
-                    pass
-                time.sleep(0.001)
-            else:
-                os.close(sync_w)
-                raise RuntimeError(
-                    f"Timed out waiting for user namespace creation (pid={pid})"
-                )
-
-            # Write full uid and gid mappings
-            outer_gid = os.getgid()
-            try:
-                subprocess.run(
-                    ["newuidmap", str(pid),
-                     "0", str(outer_uid), "1",
-                     "1", str(sub_start), str(sub_count)],
-                    check=True, capture_output=True, text=True,
-                )
-                subprocess.run(
-                    ["newgidmap", str(pid),
-                     "0", str(outer_gid), "1",
-                     "1", str(sub_start), str(sub_count)],
-                    check=True, capture_output=True, text=True,
-                )
-            except subprocess.CalledProcessError as e:
-                os.close(sync_w)
-                raise RuntimeError(
-                    f"Failed to set uid/gid mapping: {e.stderr.strip()}"
-                ) from e
-
-            logger.debug(
-                "Full uid mapping set for pid %d: 0→%d, 1-%d→%d-%d",
-                pid, outer_uid, sub_count, sub_start, sub_start + sub_count - 1,
-            )
-
-            # Signal child to proceed (close pipe → child's read returns EOF)
-            os.close(sync_w)
-            self._sync_fds = None
-
-        # Security (mask/readonly/seccomp/cap-drop) + hostname is handled
-        # by adl-seccomp. Init script only does cd + signal.
-
-        # Build ulimit commands if configured
+        # Build ulimit commands
         _ulimit_map = {
             "nofile": "-n", "nproc": "-u", "memlock": "-l",
             "stack": "-s", "core": "-c", "fsize": "-f",
@@ -368,235 +190,104 @@ class _PersistentShell:
                 ulimit_lines += f"ulimit -H {flag} {hard} 2>/dev/null\n"
                 ulimit_lines += f"ulimit -S {flag} {soft} 2>/dev/null\n"
 
-        if self._userns:
-            # User namespace: adl-seccomp handles everything.
-            init_script = (
-                "PS1='' PS2=''\n"
-                + ulimit_lines
-                + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
-                f"echo 0 >&{self._signal_fd}\n"
-            )
-        else:
-            # Rootful: adl-seccomp handles /proc, /dev, mask, readonly,
-            # seccomp, cap-drop (all after pivot_root). Init = cd + signal.
-            # When seccomp is off, adl-seccomp doesn't run so /proc isn't
-            # mounted and read_only isn't applied. Handle both here.
-            no_seccomp_init = ""
-            if not self._seccomp:
-                no_seccomp_init = "mount -t proc proc /proc 2>/dev/null\n"
-            init_script = (
-                "PS1='' PS2=''\n"
-                + no_seccomp_init
-                + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
-                f"echo 0 >&{self._signal_fd}\n"
-            )
+        # Send init script to shell (cd + signal ready)
+        init_script = (
+            "PS1='' PS2=''\n"
+            + ulimit_lines
+            + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
+            f"echo 0 >&{self._signal_fd}\n"
+        )
         self._write_input(init_script.encode())
 
-        # Wait for the init signal.
+        # Wait for the init signal
         ec_str = self._read_signal(timeout=30)
         if ec_str is None:
+            # Diagnose: is the child dead or just unresponsive?
+            detail = ""
+            if self.pid is not None:
+                try:
+                    wpid, status = os.waitpid(self.pid, os.WNOHANG)
+                    if wpid != 0:
+                        code = os.waitstatus_to_exitcode(status)
+                        detail += f" child exited with code {code}."
+                        self.pid = None
+                except ChildProcessError:
+                    detail += " child already reaped."
+                    self.pid = None
+
+            # Try to read any output the child produced (errors, etc.)
+            if self._stdout_fd is not None:
+                try:
+                    import select as _sel
+                    ep = _sel.epoll()
+                    ep.register(self._stdout_fd, _sel.EPOLLIN)
+                    events = ep.poll(0.1)
+                    if events:
+                        data = os.read(self._stdout_fd, 8192)
+                        if data:
+                            detail += f" output: {data.decode('utf-8', errors='replace').strip()!r}"
+                    ep.close()
+                except OSError:
+                    pass
+
             raise RuntimeError(
-                f"Persistent shell failed to start within 30 s "
-                f"(rootfs={self._rootfs}, shell={self._shell})"
+                f"Persistent shell failed to start "
+                f"(rootfs={self._rootfs}, shell={self._shell}).{detail}"
             )
 
-        # Create pidfd for race-free process management.
-        from agentdocker_lite._pidfd import pidfd_open
-        self._pidfd = pidfd_open(self._process.pid)
-
-        # Clean up old root mounts left by pivot_root (rootful mode only).
-        if not self._userns:
-            self._cleanup_pivot_old()
-
-        # Apply read-only rootfs after shell is ready. When seccomp is on,
-        # adl-seccomp handles this; when off, we do it here (following
-        # runc's ordering: mount /proc/dev → pivot_root → remount ro).
-        if self._read_only and not self._seccomp:
-            self.execute("mount -o remount,ro /", timeout=5)
-
-        ns_flags = "user,pid,mount" if self._userns else "pid,mount"
+        ns_flags = "user,pid,mount" if not self._rootful else "pid,mount"
         if self._net_isolate:
             ns_flags += ",net"
         logger.debug(
             "Persistent shell started: pid=%d rootfs=%s ns=[%s] tty=%s",
-            self._process.pid,
-            self._rootfs,
-            ns_flags,
-            self._tty,
+            self.pid, self._rootfs, ns_flags, self._tty,
         )
-
-    def _prepare_seccomp_helper(self) -> None:
-        """Write seccomp BPF + static helper into rootfs /tmp.
-
-        Called BEFORE pivot_root. The pivot_script then:
-            exec setsid /tmp/.adl_seccomp /bin/sh
-        The helper applies cap drop + mask + readonly + seccomp,
-        then exec's the shell. No Python needed in rootfs.
-        """
-        from pathlib import Path
-        from agentdocker_lite.security import build_seccomp_bpf
-
-        bpf_bytes = build_seccomp_bpf()
-        if bpf_bytes is None:
-            return
-
-        vendor_dir = Path(__file__).parent / "_vendor"
-        helper_src = vendor_dir / "adl-seccomp"
-        if not helper_src.exists():
-            return
-
-        tmp_dir = self._rootfs / "tmp"
-        bpf_path = tmp_dir / ".adl_seccomp.bpf"
-        # May already be written by _init_rootful (before read-only remount)
-        if bpf_path.exists():
-            return
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-
-        import shutil
-        bpf_path.write_bytes(bpf_bytes)
-        shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
-        (tmp_dir / ".adl_seccomp").chmod(0o755)
-
-    def _cleanup_pivot_old(self) -> None:
-        """Unmount /.pivot_old inside the shell's mount namespace.
-
-        After pivot_root, the old host root and all its submounts remain
-        visible at /.pivot_old.  We clean them up from the host side by
-        entering the mount namespace via setns.
-
-        Critical safety steps (following runc pivotRoot pattern):
-        1. setns into the container mount namespace
-        2. Make /.pivot_old rslave (MS_SLAVE|MS_REC) so that the
-           subsequent unmount does NOT propagate to the host
-        3. umount2(/.pivot_old, MNT_DETACH)
-        """
-        if self._process is None:
-            return
-
-        # Find the init process (PID 1 inside the namespace).
-        pid = self._process.pid
-        children_file = f"/proc/{pid}/task/{pid}/children"
-        try:
-            children = open(children_file).read().strip().split()
-            init_pid = int(children[0]) if children else pid
-        except (OSError, ValueError):
-            init_pid = pid
-
-        mnt_ns = f"/proc/{init_pid}/ns/mnt"
-        root_path = f"/proc/{init_pid}/root"
-        if not os.path.exists(mnt_ns):
-            return
-
-        import ctypes
-        import ctypes.util
-
-        MNT_DETACH = 2
-        MS_SLAVE = 1 << 19        # 0x80000
-        MS_REC = 1 << 14          # 0x4000
-        CLONE_NEWNS = 0x00020000
-
-        libc_name = ctypes.util.find_library("c")
-        if not libc_name:
-            return
-        libc = ctypes.CDLL(libc_name, use_errno=True)
-        # Set mount() arg/return types for safe ctypes calls.
-        libc.mount.argtypes = [
-            ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p,
-            ctypes.c_ulong, ctypes.c_char_p,
-        ]
-        libc.mount.restype = ctypes.c_int
-
-        child_pid = os.fork()
-        if child_pid == 0:
-            # Child: enter mount namespace, chroot to target root,
-            # then make old root rslave and unmount it.
-            try:
-                mnt_fd = os.open(mnt_ns, os.O_RDONLY)
-                root_fd = os.open(root_path, os.O_RDONLY | os.O_DIRECTORY)
-                rc = libc.setns(mnt_fd, CLONE_NEWNS)
-                os.close(mnt_fd)
-                if rc != 0:
-                    # setns failed -- do NOT proceed in host namespace.
-                    os.close(root_fd)
-                    os._exit(1)
-                # Align our root with the mount namespace root.
-                os.fchdir(root_fd)
-                os.chroot(".")
-                os.close(root_fd)
-                os.chdir("/")
-                # Make old root rslave to prevent unmount propagation
-                # to the host (runc approach: MS_SLAVE|MS_REC).
-                libc.mount(b"", b"/.pivot_old", None, MS_SLAVE | MS_REC, None)
-                libc.umount2(b"/.pivot_old", MNT_DETACH)
-            except Exception:
-                pass
-            finally:
-                os._exit(0)
-        else:
-            os.waitpid(child_pid, 0)
 
     def kill(self) -> None:
         """Kill the shell and all processes in its PID namespace."""
-        if self._process is not None:
+        if self.pid is not None:
             try:
-                # Kill the entire process group (unshare + forked children).
-                # start_new_session=True makes the process a session leader,
-                # so its PID == PGID.
                 import signal
-                os.killpg(self._process.pid, signal.SIGKILL)
-                self._process.wait(timeout=5)
-            except Exception:
+                os.killpg(self.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
                 try:
-                    self._process.kill()
-                    self._process.wait(timeout=5)
-                except Exception:
+                    os.kill(self.pid, 9)
+                except (ProcessLookupError, PermissionError):
                     pass
-            self._process = None
-        if self._master_fd is not None:
             try:
-                os.close(self._master_fd)
-            except OSError:
+                os.waitpid(self.pid, 0)
+            except ChildProcessError:
                 pass
-            self._master_fd = None
-        if self._pidfd is not None:
-            try:
-                os.close(self._pidfd)
-            except OSError:
-                pass
-            self._pidfd = None
-        if self._signal_r is not None:
-            try:
-                os.close(self._signal_r)
-            except OSError:
-                pass
-            self._signal_r = None
+            self.pid = None
+
+        for fd_name in ("_master_fd", "_pidfd", "_signal_r", "_stdin_fd", "_stdout_fd"):
+            fd = getattr(self, fd_name, None)
+            if fd is not None:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+                setattr(self, fd_name, None)
 
     @property
     def alive(self) -> bool:
-        return self._process is not None and self._process.poll() is None
+        if self.pid is None:
+            return False
+        try:
+            pid, _ = os.waitpid(self.pid, os.WNOHANG)
+            return pid == 0
+        except ChildProcessError:
+            return False
 
     # -- command execution ------------------------------------------------- #
 
     def execute(self, command: str, timeout: Optional[int] = None) -> tuple[str, int]:
-        """Execute *command* and return ``(output, exit_code)``.
-
-        Each command runs inside a ``bash -c`` sub-shell so it cannot
-        alter the persistent shell's own state.  Stdin is redirected
-        from ``/dev/null`` to prevent commands from consuming the
-        control pipe.
-
-        Completion is signaled via the signal pipe fd, so command
-        output can never collide with the control protocol.
-        """
+        """Execute *command* and return ``(output, exit_code)``."""
         with self._lock:
             if not self.alive:
                 logger.warning("Persistent shell died, restarting")
                 self.start()
 
-            # Protocol:
-            #   1. cd to working_dir
-            #   2. run command in isolated sub-shell, stdin=/dev/null
-            #   3. write exit code to signal pipe fd
             script = (
                 f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
                 f"bash -c {shlex.quote(command)} </dev/null 2>&1\n"
@@ -621,11 +312,7 @@ class _PersistentShell:
             return output, exit_code
 
     def write_stdin(self, data: str | bytes) -> None:
-        """Write raw data to the shell's stdin.
-
-        Only works in PTY mode (``tty=True``).  Use this to send input
-        to interactive programs running inside the sandbox.
-        """
+        """Write raw data to the shell's stdin (TTY mode only)."""
         if not self._tty:
             raise RuntimeError("write_stdin() requires tty=True")
         if isinstance(data, str):
@@ -636,25 +323,20 @@ class _PersistentShell:
     # -- internal I/O ------------------------------------------------------ #
 
     def _write_input(self, data: bytes) -> bool:
-        """Write to the shell's stdin (PTY master or pipe)."""
+        """Write to the shell's stdin."""
         try:
-            if self._tty and self._master_fd is not None:
-                os.write(self._master_fd, data)
-            elif self._process and self._process.stdin:
-                self._process.stdin.write(data)
-                self._process.stdin.flush()
-            else:
+            fd = self._stdin_fd
+            if fd is None:
                 return False
+            os.write(fd, data)
         except (BrokenPipeError, OSError):
             return False
         return True
 
     @property
-    def _stdout_fd(self) -> int:
+    def _stdout_read_fd(self) -> int:
         """File descriptor to read command output from."""
-        if self._tty and self._master_fd is not None:
-            return self._master_fd
-        return self._process.stdout.fileno()
+        return self._stdout_fd
 
     def _read_signal(self, timeout: Optional[float] = None) -> Optional[str]:
         """Read a single line from the signal fd."""
@@ -678,15 +360,9 @@ class _PersistentShell:
     def _read_until_signal(
         self, timeout: Optional[float] = None
     ) -> tuple[Optional[str], int]:
-        """Read stdout until the signal fd fires with the exit code.
-
-        Returns:
-            ``(output, exit_code)`` on success.
-            ``(None, -1)`` if the shell died.
-            ``(None, -2)`` on timeout.
-        """
+        """Read stdout until the signal fd fires with the exit code."""
         deadline = time.monotonic() + timeout if timeout else None
-        stdout_fd = self._stdout_fd
+        stdout_fd = self._stdout_read_fd
         signal_fd = self._signal_r
         buf = b""
         parts: list[str] = []
@@ -711,7 +387,7 @@ class _PersistentShell:
                 ready_fds = {fd for fd, _ in events}
 
                 # No events and process died → shell is gone.
-                if not events and self._process.poll() is not None:
+                if not events and not self.alive:
                     if buf:
                         parts.append(buf.decode("utf-8", errors="backslashreplace"))
                     return None, -1
@@ -767,7 +443,7 @@ class _PersistentShell:
         finally:
             ep.close()
 
-        # Reached via break (e.g. PTY EIO) — return whatever we have.
+        # Reached via break (e.g. PTY EIO)
         if buf:
             parts.append(buf.decode("utf-8", errors="backslashreplace"))
         return "".join(parts) if parts else None, exit_code if exit_code is not None else -1

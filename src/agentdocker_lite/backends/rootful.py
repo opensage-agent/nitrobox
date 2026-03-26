@@ -160,49 +160,27 @@ class RootfulSandbox(SandboxBase):
         if config.dns:
             self._write_dns(config.dns)
 
-        # Write seccomp files BEFORE read-only remount (they go into
-        # the overlayfs upper layer via the merged rootfs path).
-        if config.seccomp:
-            from agentdocker_lite.security import build_seccomp_bpf
-            bpf_bytes = build_seccomp_bpf()
-            if bpf_bytes:
-                vendor_dir = Path(__file__).parent.parent / "_vendor"
-                helper_src = vendor_dir / "adl-seccomp"
-                if helper_src.exists():
-                    tmp_dir = self._rootfs / "tmp"
-                    tmp_dir.mkdir(parents=True, exist_ok=True)
-                    (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
-                    shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
-                    (tmp_dir / ".adl_seccomp").chmod(0o755)
-
-        # Landlock config file (read by adl-seccomp before seccomp BPF)
+        # Validate Landlock config (raises if kernel doesn't support it)
         ll_config = self._build_landlock_config(config)
+
+        # Build landlock path lists for Rust init
+        ll_read: list[str] = []
+        ll_write: list[str] = []
+        ll_ports: list[int] = []
+        ll_strict = False
         if ll_config:
-            tmp_dir = self._rootfs / "tmp"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            (tmp_dir / ".adl_landlock").write_text(ll_config)
-
-        # Device passthrough config (read by adl-seccomp after /dev setup)
-        if config.devices:
-            tmp_dir = self._rootfs / "tmp"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            (tmp_dir / ".adl_devices").write_text(
-                "\n".join(config.devices) + "\n"
-            )
-
-        # Hostname config (read by adl-seccomp before cap drop / seccomp)
-        if config.hostname:
-            tmp_dir = self._rootfs / "tmp"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            (tmp_dir / ".adl_hostname").write_text(config.hostname + "\n")
-
-        # Read-only rootfs: create marker file so adl-seccomp remounts
-        # / ro after mounting /proc and /dev but before seccomp blocks
-        # mount(). Cannot remount here — pivot_root needs writable rootfs.
-        if config.read_only:
-            marker = self._rootfs / "tmp" / ".adl_readonly"
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.touch()
+            ll_strict = True
+            essential_writable = {"/dev", "/proc", "/tmp"}
+            essential_readable = {"/dev", "/proc", "/sys", "/tmp"}
+            writable_set: set[str] = set()
+            if config.writable_paths is not None:
+                writable_set = set(config.writable_paths) | essential_writable
+                ll_write = sorted(writable_set)
+            if config.readable_paths is not None:
+                all_readable = set(config.readable_paths) | essential_readable
+                ll_read = sorted(all_readable - writable_set)
+            if config.allowed_ports is not None:
+                ll_ports = list(config.allowed_ports)
 
         self._shell = self._detect_shell()
         self._cached_env = self._build_env()
@@ -221,6 +199,13 @@ class RootfulSandbox(SandboxBase):
             hostname=config.hostname,
             read_only=config.read_only,
             entrypoint=config.entrypoint,
+            rootful=True,
+            devices=config.devices or [],
+            cap_add=cap_names_to_numbers(config.cap_add) if config.cap_add else [],
+            landlock_read_paths=ll_read,
+            landlock_write_paths=ll_write,
+            landlock_ports=ll_ports,
+            landlock_strict=ll_strict,
         )
         shell_ms = (time.monotonic() - t3) * 1000
 
@@ -235,7 +220,7 @@ class RootfulSandbox(SandboxBase):
         # Store the shell process PID (not the creator's PID) so that
         # adl kill can terminate the sandbox without killing the owner.
         pid_file = self._env_dir / ".pid"
-        pid_file.write_text(str(self._persistent_shell._process.pid))
+        pid_file.write_text(str(self._persistent_shell.pid))
 
         self.features: dict[str, object] = {
             "pidfd": self._persistent_shell._pidfd is not None,
@@ -326,7 +311,7 @@ class RootfulSandbox(SandboxBase):
             if self._config.dns:
                 self._write_dns(self._config.dns)
 
-            self._write_security_files(self._upper_dir, skip_dev=True)
+            # Security handled by Rust init chain at start()
         else:
             self._unmount_binds()
             if self._fs_backend == "btrfs":
@@ -342,7 +327,7 @@ class RootfulSandbox(SandboxBase):
             if self._config.dns:
                 self._write_dns(self._config.dns)
 
-            self._write_security_files(self._rootfs)
+            # Security handled by Rust init chain at start()
 
         self._persistent_shell.start()
         self._start_pasta()
@@ -880,7 +865,7 @@ class RootfulSandbox(SandboxBase):
             return
         if not shell.alive:
             return
-        pid = shell._process.pid
+        pid = shell.pid
         try:
             subprocess.run(
                 [
@@ -908,65 +893,6 @@ class RootfulSandbox(SandboxBase):
                     except OSError:
                         pass
                 shutil.rmtree(dead, ignore_errors=True)
-
-    def _write_security_files(self, target: Path, *, skip_dev: bool = False) -> None:
-        """Write seccomp, landlock, and read_only marker into *target*/tmp.
-
-        Called during reset() for both userns (target=upper_dir) and
-        rootful (target=rootfs) paths.
-        """
-        if self._config.seccomp:
-            from agentdocker_lite.security import build_seccomp_bpf
-            bpf_bytes = build_seccomp_bpf()
-            if bpf_bytes:
-                tmp_dir = target / "tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
-                if skip_dev:
-                    (tmp_dir / ".adl_skip_dev").touch()
-                vendor_dir = Path(__file__).parent.parent / "_vendor"
-                helper_src = vendor_dir / "adl-seccomp"
-                if helper_src.exists():
-                    shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
-                    (tmp_dir / ".adl_seccomp").chmod(0o755)
-
-        ll_config = self._build_landlock_config(self._config)
-        if ll_config:
-            tmp_dir = target / "tmp"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            (tmp_dir / ".adl_landlock").write_text(ll_config)
-
-        if self._config.read_only and self._config.seccomp:
-            marker = target / "tmp" / ".adl_readonly"
-            marker.parent.mkdir(parents=True, exist_ok=True)
-            marker.touch()
-
-        # Device passthrough config (rootful only — userns uses setup script)
-        if self._config.devices and not skip_dev:
-            tmp_dir = target / "tmp"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            (tmp_dir / ".adl_devices").write_text(
-                "\n".join(self._config.devices) + "\n"
-            )
-
-        # Hostname config (adl-seccomp calls sethostname before cap drop)
-        if self._config.hostname:
-            tmp_dir = target / "tmp"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            (tmp_dir / ".adl_hostname").write_text(
-                self._config.hostname + "\n"
-            )
-
-        # cap_add (extra capabilities to keep during cap drop)
-        if self._config.cap_add:
-            from agentdocker_lite.backends.base import cap_names_to_numbers
-            cap_nums = cap_names_to_numbers(self._config.cap_add)
-            if cap_nums:
-                tmp_dir = target / "tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_cap_add").write_text(
-                    "\n".join(str(n) for n in cap_nums) + "\n"
-                )
 
     def _reset_btrfs(self):
         result = subprocess.run(
@@ -1004,7 +930,7 @@ class RootfulSandbox(SandboxBase):
     # ------------------------------------------------------------------ #
 
     def _apply_oom_score_adj(self, score: int) -> None:
-        pid = self._persistent_shell._process.pid
+        pid = self._persistent_shell.pid
         try:
             Path(f"/proc/{pid}/oom_score_adj").write_text(str(score))
         except OSError as e:
@@ -1046,7 +972,7 @@ class RootfulSandbox(SandboxBase):
             )
 
         # --- resolve netns path -----------------------------------------------
-        shell_pid = self._persistent_shell._process.pid
+        shell_pid = self._persistent_shell.pid
         netns_name = f"adl-{self._name}"
 
         # Bind-mount netns to /run/netns/ (persistent, survives PID exit).

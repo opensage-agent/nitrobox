@@ -1,6 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "agentdocker-lite"
@@ -12,6 +12,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
+    "Programming Language :: Rust",
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX :: Linux",
 ]
@@ -43,11 +44,10 @@ adl = "agentdocker_lite.cli:main"
 [project.optional-dependencies]
 dev = ["pytest>=9.0"]
 
-[tool.hatch.build.targets.wheel]
-packages = ["src/agentdocker_lite"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/agentdocker_lite/_vendor/pasta" = "agentdocker_lite/_vendor/pasta"
-"src/agentdocker_lite/_vendor/pasta.avx2" = "agentdocker_lite/_vendor/pasta.avx2"
-"src/agentdocker_lite/_vendor/criu" = "agentdocker_lite/_vendor/criu"
-"src/agentdocker_lite/_vendor/adl-seccomp" = "agentdocker_lite/_vendor/adl-seccomp"
+[tool.maturin]
+python-source = "src"
+module-name = "agentdocker_lite._core"
+features = ["pyo3/extension-module"]
+include = [
+    { path = "src/agentdocker_lite/_vendor/**", format = "sdist" },
+]

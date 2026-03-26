@@ -1,0 +1,35 @@
+[package]
+name = "adl-core"
+version = "0.0.5"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Rust core for agentdocker-lite: Linux namespace sandbox syscall interface"
+
+[lib]
+name = "adl_core"
+crate-type = ["cdylib"]
+path = "rust/src/lib.rs"
+
+[dependencies]
+pyo3 = { version = "0.28", features = ["extension-module"] }
+nix = { version = "0.31", features = [
+    "sched",     # unshare, setns
+    "mount",     # mount, umount2
+    "fs",        # chroot, chdir
+    "process",   # fork, setsid, waitpid, Pid
+    "signal",    # kill, Signal
+    "term",      # tcgetattr, tcsetattr
+    "hostname",  # sethostname
+    "ioctl",     # ioctl macros for SIOCGIFFLAGS
+    "net",       # InterfaceFlags
+] }
+rustix = { version = "1.1", features = [
+    "mount",     # fsopen, fsconfig, fsmount, move_mount (new mount API)
+    "thread",    # set_no_new_privs, set_secure_computing_mode, cap_drop
+    "process",   # pidfd_open, pidfd_send_signal
+    "fs",        # CWD constant for move_mount
+] }
+libc = "1.0.0-alpha.3"  # process_madvise (no crate covers it), seccomp BPF structs
+log = "0.4"
+env_logger = "0.11"

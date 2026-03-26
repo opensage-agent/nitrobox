@@ -183,46 +183,33 @@ class RootlessSandbox(RootfulSandbox):
         # original superblock (no SB_I_NODEV), so device nodes work if the
         # user has the required group membership (e.g., kvm group for /dev/kvm).
 
-        # --- seccomp helper in upper dir ----------------------------------
-        if config.seccomp:
-            from agentdocker_lite.security import build_seccomp_bpf
-            bpf_bytes = build_seccomp_bpf()
-            if bpf_bytes:
-                tmp_dir = self._upper_dir / "tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
-                # Marker: skip /proc+/dev mount in adl-seccomp (setup script
-                # already handles these with bind mounts instead of mknod)
-                (tmp_dir / ".adl_skip_dev").touch()
-                vendor_dir = Path(__file__).parent.parent / "_vendor"
-                helper_src = vendor_dir / "adl-seccomp"
-                if helper_src.exists():
-                    shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
-                    (tmp_dir / ".adl_seccomp").chmod(0o755)
-
-        # --- Landlock config in upper dir ---------------------------------
+        # --- Landlock validation ------------------------------------------
         ll_config = self._build_landlock_config(config)
+
+        # Build landlock path lists for Rust init
+        ll_read: list[str] = []
+        ll_write: list[str] = []
+        ll_ports: list[int] = []
+        ll_strict = False
         if ll_config:
-            tmp_dir = self._upper_dir / "tmp"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            (tmp_dir / ".adl_landlock").write_text(ll_config)
+            ll_strict = True
+            essential_writable = {"/dev", "/proc", "/tmp"}
+            essential_readable = {"/dev", "/proc", "/sys", "/tmp"}
+            writable_set: set[str] = set()
+            if config.writable_paths is not None:
+                writable_set = set(config.writable_paths) | essential_writable
+                ll_write = sorted(writable_set)
+            if config.readable_paths is not None:
+                all_readable = set(config.readable_paths) | essential_readable
+                ll_read = sorted(all_readable - writable_set)
+            if config.allowed_ports is not None:
+                ll_ports = list(config.allowed_ports)
 
-        # --- Hostname config (adl-seccomp calls sethostname before cap drop) ---
-        if config.hostname:
-            tmp_dir = self._upper_dir / "tmp"
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            (tmp_dir / ".adl_hostname").write_text(config.hostname + "\n")
-
-        # --- cap_add (extra capabilities to keep during cap drop) ---
+        # --- cap_add ------------------------------------------------------
+        cap_add_nums: list[int] = []
         if config.cap_add:
             from agentdocker_lite.backends.base import cap_names_to_numbers
-            cap_nums = cap_names_to_numbers(config.cap_add)
-            if cap_nums:
-                tmp_dir = self._upper_dir / "tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_cap_add").write_text(
-                    "\n".join(str(n) for n in cap_nums) + "\n"
-                )
+            cap_add_nums = cap_names_to_numbers(config.cap_add) or []
 
         # --- DNS ----------------------------------------------------------
         if config.dns:
@@ -233,19 +220,13 @@ class RootlessSandbox(RootfulSandbox):
             wd = self._upper_dir / config.working_dir.lstrip("/")
             wd.mkdir(parents=True, exist_ok=True)
 
-        # --- generate setup script ----------------------------------------
         self._shell = self._detect_shell()
-        setup_script_path = self._generate_userns_setup_script()
-
         self._cached_env = self._build_env()
 
         # --- detect subordinate uid range for full mapping -----------------
         subuid_range = self._detect_subuid_range()
 
-        # --- start persistent shell ---------------------------------------
-        # In rootless mode with port_map, DON'T pass net_isolate to unshare.
-        # The setup script handles network isolation + pasta internally
-        # (pasta needs to run inside the userns for CAP_SYS_ADMIN).
+        # --- start persistent shell (Rust init chain) ---------------------
         shell_net_isolate = config.net_isolate and not config.port_map and not config.net_ns
         t0 = time.monotonic()
         self._persistent_shell = _PersistentShell(
@@ -257,13 +238,29 @@ class RootlessSandbox(RootfulSandbox):
             net_isolate=shell_net_isolate,
             net_ns=config.net_ns,
             seccomp=config.seccomp,
-            userns_setup_script=str(setup_script_path),
-            systemd_scope_properties=self._systemd_scope_properties or None,
             hostname=config.hostname,
+            read_only=config.read_only,
             subuid_range=subuid_range,
             shared_userns=config.shared_userns,
             ulimits=config.ulimits or None,
             entrypoint=config.entrypoint,
+            rootful=False,
+            lowerdir_spec=self._lowerdir_spec,
+            upper_dir=str(self._upper_dir),
+            work_dir=str(self._work_dir),
+            volumes=list(config.volumes) if config.volumes else [],
+            devices=config.devices or [],
+            shm_size=int(config.shm_size) if config.shm_size else None,
+            tmpfs_mounts=list(config.tmpfs) if config.tmpfs else [],
+            cap_add=cap_add_nums,
+            landlock_read_paths=ll_read,
+            landlock_write_paths=ll_write,
+            landlock_ports=ll_ports,
+            landlock_strict=ll_strict,
+            env_dir=str(self._env_dir),
+            port_map=list(config.port_map) if config.port_map else [],
+            pasta_bin=self._find_pasta_bin(),
+            ipv6=config.ipv6 if hasattr(config, 'ipv6') else False,
         )
         shell_ms = (time.monotonic() - t0) * 1000
 
@@ -278,7 +275,7 @@ class RootlessSandbox(RootfulSandbox):
         # Store the shell process PID (not the creator's PID) so that
         # adl kill can terminate the sandbox without killing the owner.
         pid_file = self._env_dir / ".pid"
-        pid_file.write_text(str(self._persistent_shell._process.pid))
+        pid_file.write_text(str(self._persistent_shell.pid))
 
         self.features: dict[str, object] = {
             "userns": True,
@@ -302,212 +299,15 @@ class RootlessSandbox(RootfulSandbox):
             name, self._rootfs, feat_str, shell_ms,
         )
 
-    def _generate_userns_setup_script(self) -> Path:
-        """Generate bash setup script for user namespace mode.
-
-        This script runs inside the user namespace (before chroot) and:
-        1. Mounts overlayfs
-        2. Mounts /proc and /dev (with bind-mounted devices, no mknod)
-        3. Bind-mounts volumes
-        4. Execs into chroot -- after this, stdin commands go to the inner bash
-        """
-        merged = self._rootfs
-        upper = self._upper_dir
-        work = self._work_dir
-        shell = self._shell
-        norc = " --norc --noprofile" if "bash" in shell else ""
-
-        lines = [
-            "#!/bin/bash",
-            "set -e",
-            "",
-            "# Fix 000-perm dirs left by previous overlayfs (shell restart)",
-            f"chmod -R 700 {work} 2>/dev/null || true",
-            f"rm -rf {work}/work 2>/dev/null || true",
-            "",
-            "# Mount overlayfs (LIBMOUNT_FORCE_MOUNT2 forces legacy mount(2) syscall,",
-            "# bypassing fsconfig 256-byte limit in util-linux >= 2.39)",
-            f"LIBMOUNT_FORCE_MOUNT2=always mount -t overlay overlay "
-            f"-o lowerdir={self._lowerdir_spec},upperdir={upper},workdir={work},userxattr {merged}",
-        ]
-
-        # Pre-create volume mount points BEFORE read-only remount.
-        for spec in self._config.volumes:
-            if not isinstance(spec, str) or ":" not in spec:
-                continue
-            parts = spec.split(":")
-            container_path = parts[1] if len(parts) > 1 else "/"
-            target = f"{merged}/{container_path.lstrip('/')}"
-            lines.append(f"mkdir -p {target}")
-
-        # Read-only rootfs: bind + remount ro BEFORE other mounts.
-        # Mounts added afterwards (/proc, /dev, volumes) are on top and stay rw.
-        if self._config.read_only:
-            lines.append(f"mount --bind {merged} {merged}")
-            lines.append(f"mount -o remount,ro,bind {merged}")
-
-        lines.extend([
-            "",
-            "# Mount /proc",
-            f"mount -t proc proc {merged}/proc",
-            # sysfs only works in userns when network namespace is also new
-            f"mount -t sysfs sysfs {merged}/sys 2>/dev/null || true"
-            if self._config.net_isolate else
-            "# /sys: skipped (requires net_isolate=True in userns)",
-            "",
-            "# Setup /dev (bind mount from host -- mknod not available in userns)",
-            f"mount -t tmpfs -o nosuid,mode=0755 tmpfs {merged}/dev",
-        ])
-
-        for dev in ["null", "zero", "full", "random", "urandom", "tty"]:
-            lines.append(f"touch {merged}/dev/{dev} 2>/dev/null || true")
-            lines.append(
-                f"mount --bind /dev/{dev} {merged}/dev/{dev} 2>/dev/null || true"
-            )
-
-        lines.extend([
-            f"ln -sf /proc/self/fd {merged}/dev/fd 2>/dev/null || true",
-            f"ln -sf /proc/self/fd/0 {merged}/dev/stdin 2>/dev/null || true",
-            f"ln -sf /proc/self/fd/1 {merged}/dev/stdout 2>/dev/null || true",
-            f"ln -sf /proc/self/fd/2 {merged}/dev/stderr 2>/dev/null || true",
-            f"mkdir -p {merged}/dev/pts {merged}/dev/shm 2>/dev/null || true",
-            f"mount -t devpts devpts {merged}/dev/pts -o nosuid,newinstance,ptmxmode=0666 2>/dev/null || true",
-            f"ln -sf pts/ptmx {merged}/dev/ptmx 2>/dev/null || true",
-        ])
-
-        # /dev/shm as tmpfs (256MB default — generous enough for QEMU/PyTorch,
-        # tmpfs is demand-paged so unused space costs nothing)
-        shm_size = self._config.shm_size or str(256 * 1024 * 1024)
-        lines.append(
-            f"mount -t tmpfs -o nosuid,nodev,noexec,size={shm_size} "
-            f"tmpfs {merged}/dev/shm"
-        )
-
-        # Custom device passthrough (e.g., /dev/kvm, /dev/fuse)
-        # Bind-mount from host devtmpfs preserves the original superblock
-        # (no SB_I_NODEV), so the device is usable if the user has the
-        # required group membership (e.g., kvm group for /dev/kvm).
-        if self._config.devices:
-            lines.append("")
-            lines.append("# Device passthrough (bind mount from host)")
-            for dev_path in self._config.devices:
-                dev_name = dev_path.lstrip("/")
-                target = f"{merged}/{dev_name}"
-                parent = str(Path(dev_name).parent)
-                if parent and parent != ".":
-                    lines.append(f"mkdir -p {merged}/{parent} 2>/dev/null || true")
-                lines.append(f"touch {target} 2>/dev/null || true")
-                lines.append(f"mount --bind {dev_path} {target} 2>/dev/null || true")
-
-        lines.extend([
-            "",
-            "# Propagate DNS: copy host resolv.conf if sandbox one is empty/missing",
-            f"if [ ! -s {merged}/etc/resolv.conf ] && [ -s /etc/resolv.conf ]; then",
-            f"  cp /etc/resolv.conf {merged}/etc/resolv.conf 2>/dev/null || true",
-            "fi",
-            "",
-            "# Ensure /tmp has standard permissions (Docker exports may lose them)",
-            f"chmod 1777 {merged}/tmp 2>/dev/null || true",
-            "",
-        ])
-
-        # Volume mounts (mount points already created above, before ro remount)
-        for spec in self._config.volumes:
-            if not isinstance(spec, str) or ":" not in spec:
-                continue
-            parts = spec.split(":")
-            host_path = parts[0]
-            container_path = parts[1] if len(parts) > 1 else "/"
-            mode = parts[2] if len(parts) > 2 else "rw"
-            target = f"{merged}/{container_path.lstrip('/')}"
-            if mode == "cow":
-                safe = container_path.replace("/", "_").strip("_")
-                cow_upper = self._env_dir / f"cow_{safe}_upper"
-                cow_work = self._env_dir / f"cow_{safe}_work"
-                cow_upper.mkdir(parents=True, exist_ok=True)
-                cow_work.mkdir(parents=True, exist_ok=True)
-                lines.append(
-                    f"mount -t overlay overlay "
-                    f"-o lowerdir={host_path},upperdir={cow_upper},"
-                    f"workdir={cow_work} {target}"
-                )
-            else:
-                lines.append(f"mount --bind {host_path} {target}")
-                if mode == "ro":
-                    lines.append(f"mount -o remount,ro,bind {target}")
-
-        # --- Tmpfs mounts ---
-        if self._config.tmpfs:
-            lines.append("")
-            lines.append("# Tmpfs mounts")
-            for spec in self._config.tmpfs:
-                parts = spec.split(":", 1)
-                path = parts[0]
-                opts = parts[1] if len(parts) > 1 else ""
-                target = f"{merged}/{path.lstrip('/')}"
-                lines.append(f"mkdir -p {target}")
-                mount_opts = f"-o {opts}" if opts else ""
-                lines.append(f"mount -t tmpfs {mount_opts} tmpfs {target}")
-
-        # --- Network isolation + pasta (rootless) ---
-        # When port_map is set, unshare did NOT create a net namespace.
-        # We handle it here (inside userns where we have CAP_SYS_ADMIN):
-        # 1. Create a new netns via unshare --net, bind-mount it
-        # 2. Run pasta (still in host netns, can bind host ports)
-        # 3. nsenter --net into the new netns for chroot
-        # Hostname is set by adl-seccomp via sethostname() syscall
-        # (reads /tmp/.adl_hostname, written to upper dir above).
-
-        port_map = self._config.port_map
-        # Use adl-seccomp for cap drop + mask + readonly + seccomp BPF.
-        # It skips /proc+/dev mount when .adl_skip_dev marker exists.
-        seccomp_wrap = "/tmp/.adl_seccomp " if self._config.seccomp else ""
-        # OCI ENTRYPOINT: prepend to shell exec so entrypoint runs
-        # initialization, then `exec "$@"` hands off to the shell.
-        ep_prefix = ""
-        if self._config.entrypoint:
-            ep_prefix = " ".join(shlex.quote(a) for a in self._config.entrypoint) + " "
-        chroot_cmd = f"exec chroot {merged} {seccomp_wrap}{ep_prefix}{shell}{norc}"
-
-        if port_map:
-            vendored = Path(__file__).parent.parent / "_vendor" / "pasta"
-            pasta_bin = str(vendored) if vendored.exists() else shutil.which("pasta") or ""
-
-            if pasta_bin:
-                netns_file = self._env_dir / ".netns"
-                pasta_args = f"{pasta_bin} --config-net"
-                if not self._config.ipv6:
-                    pasta_args += " --ipv4-only"
-                for mapping in port_map:
-                    pasta_args += f" -t {mapping}"
-                pasta_args += (
-                    " -u none -T none -U none"
-                    " --dns-forward 169.254.1.1 --no-map-gw --quiet"
-                    f" --netns {netns_file}"
-                    " --map-guest-addr 169.254.1.2"
-                )
-                lines.extend([
-                    "",
-                    "# Create network namespace (inside userns for CAP_SYS_ADMIN)",
-                    f"touch {netns_file}",
-                    f"unshare --net mount --bind /proc/self/ns/net {netns_file}",
-                    "",
-                    "# Start pasta (in host netns, can bind host ports)",
-                    pasta_args,
-                    "",
-                    "# Enter netns, bring up lo, then chroot",
-                    f"exec nsenter --net={netns_file} bash -c "
-                    f"'ip link set lo up 2>/dev/null; {chroot_cmd}'",
-                ])
-            else:
-                lines.extend(["", chroot_cmd])
-        else:
-            lines.extend(["", chroot_cmd])
-
-        script_path = self._env_dir / "setup.sh"
-        script_path.write_text("\n".join(lines) + "\n")
-        script_path.chmod(0o755)
-        return script_path
+    @staticmethod
+    def _find_pasta_bin() -> str | None:
+        """Find the pasta binary (vendored or system)."""
+        vendored = Path(__file__).parent.parent / "_vendor" / "pasta"
+        if vendored.exists() and vendored.is_file():
+            return str(vendored)
+        if shutil.which("pasta"):
+            return "pasta"
+        return None
 
     @staticmethod
     def _check_prerequisites_userns() -> None:

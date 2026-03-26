@@ -149,12 +149,9 @@ def _parse_io_max(value: str) -> str:
 
 
 def _convert_cpu_shares(shares: int) -> int:
-    """Convert Docker ``--cpu-shares`` to cgroup v2 ``cpu.weight``.
-
-    Docker uses a range of 2-262144 (default 1024).
-    cgroup v2 uses 1-10000 (default 100).
-    """
-    return max(1, min(10000, 1 + ((shares - 2) * 9999) // 262142))
+    """Convert Docker ``--cpu-shares`` to cgroup v2 ``cpu.weight``."""
+    from agentdocker_lite._core import py_convert_cpu_shares
+    return int(py_convert_cpu_shares(shares))
 
 
 # ------------------------------------------------------------------ #
@@ -902,7 +899,7 @@ class SandboxBase(abc.ABC):
         else:
             cmd_args = ["bash", "-c", command]
 
-        shell_pid = self._persistent_shell._process.pid
+        shell_pid = self._persistent_shell.pid
 
         if getattr(self, "_userns", False):
             # User namespace mode: use os.setns() in preexec_fn to enter
@@ -1057,30 +1054,6 @@ class SandboxBase(abc.ABC):
         if pidfd is None:
             return False
 
-        import ctypes
-        import ctypes.util
-        import platform
-
-        SYS_PROCESS_MADVISE = {"x86_64": 440, "aarch64": 440}.get(
-            platform.machine()
-        )
-        MADV_COLD = 20
-
-        if SYS_PROCESS_MADVISE is None:
-            return False
-
-        libc_name = ctypes.util.find_library("c")
-        if not libc_name:
-            return False
-        libc = ctypes.CDLL(libc_name, use_errno=True)
-
-        # process_madvise(pidfd, iovec, iovcnt, advice, flags)
-        # We pass a zero-length iovec — the kernel applies the hint
-        # to the entire process address space when iovec is empty.
-
-        class Iovec(ctypes.Structure):
-            _fields_ = [("iov_base", ctypes.c_void_p), ("iov_len", ctypes.c_size_t)]
-
         # Warn once if no swap is available.
         if not getattr(SandboxBase, "_swap_warned", False):
             try:
@@ -1098,9 +1071,8 @@ class SandboxBase(abc.ABC):
             except (OSError, ValueError):
                 pass
 
-        iov = Iovec(0, 0)
-        ret = libc.syscall(SYS_PROCESS_MADVISE, pidfd, ctypes.byref(iov), 1, MADV_COLD, 0)
-        return ret >= 0
+        from agentdocker_lite._core import py_process_madvise_cold
+        return py_process_madvise_cold(pidfd)
 
     # -- Docker image export ----------------------------------------------- #
 
@@ -1238,29 +1210,8 @@ class SandboxBase(abc.ABC):
                 target=str(rootfs),
             )
 
-        # Re-write seccomp helper for userns mode (upper dir was replaced).
-        if self._config.seccomp and self._userns:
-            from agentdocker_lite.security import build_seccomp_bpf
-            bpf_bytes = build_seccomp_bpf()
-            if bpf_bytes and upper:
-                tmp_dir = upper / "tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_seccomp.bpf").write_bytes(bpf_bytes)
-                vendor_dir = Path(__file__).parent / "_vendor"
-                helper_src = vendor_dir / "adl-seccomp"
-                if helper_src.exists():
-                    import shutil as _shutil
-                    _shutil.copy2(str(helper_src), str(tmp_dir / ".adl_seccomp"))
-                    (tmp_dir / ".adl_seccomp").chmod(0o755)
-
-        # Re-write Landlock config for userns mode (upper dir was replaced).
-        if self._userns and upper:
-            ll_config = self._build_landlock_config(self._config)
-            if ll_config:
-                tmp_dir = upper / "tmp"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                (tmp_dir / ".adl_landlock").write_text(ll_config)
-
+        # Security files (seccomp, landlock, etc.) are no longer written
+        # to the rootfs — Rust init chain handles them directly at start().
         self._persistent_shell.start()
         logger.debug("Snapshot restored: %s -> %s", path, upper)
 

@@ -9,3 +9,6 @@ build/
 dev/
 site/
 uv.lock
+target/
+*.so
+.envrc

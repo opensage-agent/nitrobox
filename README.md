@@ -42,14 +42,14 @@ for task in swebench_tasks:
 from agentdocker_lite import Sandbox, SandboxConfig
 
 for task in swebench_tasks:
-    # Create — ~7ms (45x faster)
+    # Create — ~25ms (13x faster)
     sb = Sandbox(SandboxConfig.from_docker(
         task.instance_image,
     ))
-    # Eval — ~11ms/cmd (1.7x faster)
+    # Eval — ~11ms/cmd (1.6x faster)
     sb.run("bash /eval.sh")
 
-    # Reset — ~7ms (82x faster, no recreate)
+    # Reset — ~16ms (38x faster, no recreate)
     sb.reset()
 ```
 </td>
@@ -263,12 +263,13 @@ output, _ = sb.run("cat /workspace/data.txt")
 
 | | Docker | agentdocker-lite | Speedup |
 |---|---|---|---|
-| Create | 320ms | 7ms | **45x** |
-| Per command | 17ms | 11ms | **1.7x** |
-| Reset | 605ms | 7ms | **82x** |
-| Delete | 217ms | 2ms | **127x** |
-| Reset loop (100 cycles) | 2.0/s | 57.1/s | **29x** |
-| 16x concurrent | 32 cmd/s | 1009 cmd/s | **32x** |
+| Create | 320ms | 25ms | **13x** |
+| Per command | 17ms | 11ms | **1.6x** |
+| Reset | 605ms | 16ms | **38x** |
+| Delete | 217ms | 2ms | **109x** |
+| Throughput | — | 94 cmd/s | — |
+| Reset loop | 2.0/s | 62.8/s | **31x** |
+| 16x concurrent | 32 cmd/s | 655 cmd/s | **20x** |
 
 Full benchmark (checkpoint, concurrency, sustained workloads): [docs/quick_start.md](docs/quick_start.md#performance) | Reproduce: `python examples/benchmark.py`
 
