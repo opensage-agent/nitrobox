@@ -431,6 +431,7 @@ class SandboxConfig:
         if "privileged" in kwargs:
             if kwargs.pop("privileged"):
                 cfg_kwargs["seccomp"] = False
+                cfg_kwargs["cap_add"] = list(CAP_NAME_TO_NUM.keys())
 
         # --- TTY ---
         if "tty" in kwargs:
@@ -615,6 +616,21 @@ class SandboxConfig:
                 kwargs["entrypoint"] = [ep]
             elif a == "--privileged":
                 kwargs["seccomp"] = False
+                kwargs.setdefault("cap_add", []).extend(CAP_NAME_TO_NUM.keys())
+            elif a == "--oom-score-adj":
+                kwargs["oom_score_adj"] = int(_take())
+            elif a == "--env-file":
+                path = Path(_take())
+                if path.exists():
+                    for line in path.read_text().splitlines():
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, _, v = line.partition("=")
+                            env[k.strip()] = v.strip()
+            elif a == "--security-opt":
+                opt = _take()
+                if opt in ("seccomp=unconfined", "seccomp:unconfined"):
+                    kwargs["seccomp"] = False
             elif a == "--network":
                 if _take() == "none":
                     kwargs["net_isolate"] = True

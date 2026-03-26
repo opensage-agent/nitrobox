@@ -1569,9 +1569,12 @@ class TestFromDocker:
         cfg = SandboxConfig.from_docker("img", read_only=True)
         assert cfg.read_only is True
 
-    def test_privileged_disables_seccomp(self):
+    def test_privileged_disables_seccomp_and_grants_all_caps(self):
         cfg = SandboxConfig.from_docker("img", privileged=True)
         assert cfg.seccomp is False
+        assert len(cfg.cap_add) > 30  # all caps
+        assert "SYS_ADMIN" in cfg.cap_add
+        assert "NET_RAW" in cfg.cap_add
 
     def test_pids_limit(self):
         cfg = SandboxConfig.from_docker("img", pids_limit=256)
@@ -1684,6 +1687,31 @@ class TestFromDockerRun:
         assert cfg.dns == ["8.8.8.8"]
         assert cfg.read_only is True
         assert cfg.working_dir == "/app"
+
+    def test_privileged_grants_all_caps(self):
+        cfg = SandboxConfig.from_docker_run("docker run --privileged ubuntu")
+        assert cfg.seccomp is False
+        assert len(cfg.cap_add) > 30
+        assert "SYS_ADMIN" in cfg.cap_add
+
+    def test_oom_score_adj(self):
+        cfg = SandboxConfig.from_docker_run("docker run --oom-score-adj=500 ubuntu")
+        assert cfg.oom_score_adj == 500
+
+    def test_security_opt_seccomp_unconfined(self):
+        cfg = SandboxConfig.from_docker_run(
+            "docker run --security-opt seccomp=unconfined ubuntu"
+        )
+        assert cfg.seccomp is False
+
+    def test_env_file(self, tmp_path):
+        env_file = tmp_path / ".env"
+        env_file.write_text("DB_HOST=localhost\nDB_PORT=5432\n# comment\n")
+        cfg = SandboxConfig.from_docker_run(
+            f"docker run --env-file {env_file} ubuntu"
+        )
+        assert cfg.environment["DB_HOST"] == "localhost"
+        assert cfg.environment["DB_PORT"] == "5432"
 
 
 class TestGetImageConfig:
