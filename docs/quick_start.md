@@ -282,7 +282,31 @@ config = SandboxConfig(
     dns=["8.8.8.8", "1.1.1.1"],      # custom DNS servers
     read_only=True,                   # read-only rootfs (/dev, /proc, volumes still writable)
     net_isolate=True,                 # loopback only (or use port_map for NAT + ports)
+    entrypoint=["/docker-entrypoint.sh"],  # OCI entrypoint (auto-filled from image if not set)
 )
+```
+
+### OCI ENTRYPOINT
+
+Image entrypoint scripts are auto-applied from the OCI image config. The entrypoint runs before the shell, does initialization (create dirs, set permissions, etc.), then hands off via `exec "$@"`:
+
+```python
+# Entrypoint from image config is auto-applied — no extra config needed:
+sb = Sandbox(SandboxConfig(image="postgres:15"))
+# docker-entrypoint.sh ran automatically (initdb, permissions, etc.)
+sb.run("psql --version")  # postgres tools available
+
+# Override with explicit entrypoint:
+sb = Sandbox(SandboxConfig(
+    image="postgres:15",
+    entrypoint=["/custom-init.sh"],
+))
+
+# Disable image entrypoint:
+sb = Sandbox(SandboxConfig(
+    image="postgres:15",
+    entrypoint=[],  # skip image entrypoint
+))
 ```
 
 ## Device passthrough
@@ -342,10 +366,11 @@ All security features are **on by default** with zero runtime overhead.
 
 ### Default protections (no configuration needed)
 
+- **PID 1 init**: dedicated init process (bubblewrap pattern) reaps zombie orphans, propagates exit codes (128+signal). Shell runs as PID 2.
 - **seccomp-bpf**: blocks 30+ dangerous syscalls (ptrace, mount, kexec, bpf, unshare, setns, etc.)
 - **Masked paths**: `/proc/kcore`, `/proc/keys`, `/proc/timer_list`, `/proc/sched_debug`, `/sys/firmware`, `/proc/scsi` bound to `/dev/null`
 - **Read-only paths**: `/proc/bus`, `/proc/fs`, `/proc/irq`, `/proc/sys`, `/proc/sysrq-trigger`
-- **Capability dropping**: all non-essential Linux capabilities dropped (keeps Docker-default 13 caps)
+- **Capability dropping**: all non-essential Linux capabilities dropped (keeps Docker-default 13 caps), `PR_SET_DUMPABLE` restored after drop
 - **Time namespace**: isolates monotonic/boottime clocks, ensures CRIU restore sees continuous time (kernel 5.6+)
 
 ### Landlock path/port restrictions
@@ -478,6 +503,7 @@ python examples/benchmark.py
 | `--gpus all` | `devices=["/dev/nvidia0", ...]` |
 | `-e KEY=value` | `environment={"KEY": "value"}` |
 | `--device /dev/kvm` | `devices=["/dev/kvm"]` |
+| `--entrypoint /init.sh` | `entrypoint=["/init.sh"]` |
 | `--security-opt seccomp=...` | `seccomp=True` (default) |
 | `--cpuset-cpus 0-3` | `cpuset_cpus="0-3"` |
 | `--oom-score-adj 500` | `oom_score_adj=500` |
@@ -517,7 +543,7 @@ sb.run("echo hello")
 sb.delete()
 ```
 
-Supported parameters: `cpus`, `mem_limit`, `memswap_limit`, `pids_limit`, `cpu_shares`, `volumes` (dict or list), `ports` (dict or list), `environment` (dict or list), `hostname`, `dns`, `read_only`, `working_dir`, `devices`, `network_mode`, `tty`, `security_opt`, `privileged`, `oom_score_adj`, `cpuset_cpus`, `shm_size`, `tmpfs` (dict or list). Unsupported parameters are logged as warnings and ignored.
+Supported parameters: `cpus`, `mem_limit`, `memswap_limit`, `pids_limit`, `cpu_shares`, `volumes` (dict or list), `ports` (dict or list), `environment` (dict or list), `hostname`, `dns`, `read_only`, `working_dir`, `devices`, `network_mode`, `tty`, `security_opt`, `privileged`, `oom_score_adj`, `cpuset_cpus`, `shm_size`, `tmpfs` (dict or list), `entrypoint` (str or list). Unsupported parameters are logged as warnings and ignored.
 
 ### `SandboxConfig.from_docker_run()` — CLI command string
 
@@ -532,7 +558,7 @@ sb = Sandbox(SandboxConfig.from_docker_run(
 sb.run("echo hello")
 ```
 
-Handles `sudo docker run`, combined flags (`-dit`), `--key=value` and `--key value` styles, and silently ignores unsupported flags like `-d`, `--rm`, `--name`.
+Handles `sudo docker run`, combined flags (`-dit`), `--key=value` and `--key value` styles, `--entrypoint`, and silently ignores unsupported flags like `-d`, `--rm`, `--name`.
 
 ## Docker Compose compatibility
 
