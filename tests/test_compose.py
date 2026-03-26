@@ -1043,3 +1043,132 @@ class TestComposeProject:
             assert cap_int & NET_ADMIN_BIT, f"NET_ADMIN not in caps: {cap_hex}"
         finally:
             proj.down()
+
+    def test_privileged_grants_all_caps(self, tmp_path, shared_cache_dir):
+        """privileged: true should grant all capabilities."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              priv:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                privileged: true
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-privileged",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            sb = proj.services["priv"]
+
+            # privileged should disable seccomp
+            assert sb._config.seccomp is False
+
+            # Should have all capabilities (SYS_ADMIN=21, SYS_PTRACE=19, etc.)
+            output, ec = sb.run("cat /proc/self/status | grep CapEff")
+            assert ec == 0
+            cap_hex = output.strip().split()[-1]
+            cap_int = int(cap_hex, 16)
+            SYS_ADMIN_BIT = 1 << 21
+            SYS_PTRACE_BIT = 1 << 19
+            NET_RAW_BIT = 1 << 13
+            assert cap_int & SYS_ADMIN_BIT, f"SYS_ADMIN not in caps: {cap_hex}"
+            assert cap_int & SYS_PTRACE_BIT, f"SYS_PTRACE not in caps: {cap_hex}"
+            assert cap_int & NET_RAW_BIT, f"NET_RAW not in caps: {cap_hex}"
+        finally:
+            proj.down()
+
+    def test_restart_on_failure(self, tmp_path, shared_cache_dir):
+        """restart: on-failure should restart a crashing process."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              crasher:
+                image: ubuntu:22.04
+                command: "sh -c 'echo restarted >> /tmp/restarts; exit 1'"
+                restart: on-failure
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-restart",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            import time
+            time.sleep(5)  # let it crash and restart a few times
+            output, ec = proj.services["crasher"].run("wc -l < /tmp/restarts")
+            assert ec == 0
+            count = int(output.strip())
+            assert count >= 2, f"expected at least 2 restarts, got {count}"
+        finally:
+            proj.down()
+
+    def test_restart_always_restarts_on_exit_0(self, tmp_path, shared_cache_dir):
+        """restart: always should restart even on exit 0."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              exiter:
+                image: ubuntu:22.04
+                command: "sh -c 'echo ran >> /tmp/runs; exit 0'"
+                restart: always
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-restart-always",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            import time
+            time.sleep(5)
+            output, ec = proj.services["exiter"].run("wc -l < /tmp/runs")
+            assert ec == 0
+            count = int(output.strip())
+            assert count >= 2, f"expected at least 2 runs, got {count}"
+        finally:
+            proj.down()
+
+    def test_restart_no_does_not_restart(self, tmp_path, shared_cache_dir):
+        """restart: no should not restart after exit."""
+        self._skip_if_no_sandbox()
+
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              oneshot:
+                image: ubuntu:22.04
+                command: "sh -c 'echo ran >> /tmp/runs; exit 1'"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-no-restart",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up()
+            import time
+            time.sleep(3)
+            output, ec = proj.services["oneshot"].run("wc -l < /tmp/runs")
+            assert ec == 0
+            count = int(output.strip())
+            assert count == 1, f"expected exactly 1 run, got {count}"
+        finally:
+            proj.down()
