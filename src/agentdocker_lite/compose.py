@@ -735,6 +735,11 @@ class ComposeProject:
             config_kwargs["memory_max"] = svc.mem_limit
         if svc.memswap_limit:
             config_kwargs["memory_swap"] = svc.memswap_limit
+        if svc.entrypoint:
+            ep = svc.entrypoint
+            if isinstance(ep, str):
+                ep = ["sh", "-c", ep]
+            config_kwargs["entrypoint"] = list(ep)
         if self._env_base_dir:
             config_kwargs["env_base_dir"] = self._env_base_dir
         if self._rootfs_cache_dir:

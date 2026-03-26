@@ -463,9 +463,17 @@ class SandboxConfig:
             if ulimits:
                 cfg_kwargs["ulimits"] = ulimits
 
+        # --- Entrypoint ---
+        if "entrypoint" in kwargs:
+            ep = kwargs.pop("entrypoint")
+            if isinstance(ep, str):
+                ep = [ep]
+            if ep:
+                cfg_kwargs["entrypoint"] = list(ep)
+
         # Pop known-but-unsupported params silently
         _docker_ignored = {
-            "command", "entrypoint", "name", "detach", "remove",
+            "command", "name", "detach", "remove",
             "auto_remove", "stdout", "stderr", "stream", "user",
             "labels", "log_config", "nano_cpus", "network",
             "network_disabled", "platform", "runtime",
@@ -575,6 +583,9 @@ class SandboxConfig:
                     kwargs.setdefault("ulimits", {})[name] = (int(soft), int(hard))
                 elif limits:
                     kwargs.setdefault("ulimits", {})[name] = (int(limits), int(limits))
+            elif a == "--entrypoint":
+                ep = _take()
+                kwargs["entrypoint"] = [ep]
             elif a == "--privileged":
                 kwargs["seccomp"] = False
             elif a == "--network":
