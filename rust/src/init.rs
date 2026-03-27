@@ -34,9 +34,7 @@ pub struct SandboxSpawnConfig {
     pub net_isolate: bool,
     pub net_ns: Option<String>,
     pub shared_userns: Option<String>,
-    pub map_root_user: bool,
     pub subuid_range: Option<(u32, u32, u32)>,
-    pub time_ns: bool,
     pub seccomp: bool,
     pub cap_add: Vec<u32>,
     pub hostname: Option<String>,
@@ -298,7 +296,14 @@ fn mount_volumes(config: &SandboxSpawnConfig) {
             "ro" => {
                 if let Err(e) = mnt(Some(host_path), &target, None::<&str>, MsFlags::MS_BIND, None) {
                     log::warn!("ro volume bind {} failed: {}", container_path, e);
-                } else if let Err(e) = mnt(None::<&str>, &target, None::<&str>, MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY, None) {
+                } else if let Err(e) = mnt(
+                    None::<&str>, &target, None::<&str>,
+                    // In user namespaces the kernel locks MS_NOSUID|MS_NODEV on
+                    // bind mounts; a remount that drops them is rejected with EPERM.
+                    MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY
+                        | MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+                    None,
+                ) {
                     log::warn!("ro volume remount {} failed: {}", container_path, e);
                 }
             }
@@ -575,6 +580,14 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
     };
 
     let needs_userns_sync = config.userns && config.shared_userns.is_none();
+    // userns_ready pipe: child writes after unshare, parent reads before uid_map write.
+    // Replaces polling /proc/pid/ns/user (which held GIL in a sleep loop).
+    let (userns_ready_r, userns_ready_w) = if needs_userns_sync {
+        let (r, w) = unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(io::Error::from)?;
+        (Some(r.into_raw_fd()), Some(w.into_raw_fd()))
+    } else {
+        (None, None)
+    };
     let (sync_r, sync_w) = if needs_userns_sync {
         let (r, w) = unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(io::Error::from)?;
         (Some(r.into_raw_fd()), Some(w.into_raw_fd()))
@@ -606,6 +619,7 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
             let _ = nix::unistd::close(signal_r);
             let _ = nix::unistd::close(err_r);
             if let Some(sw) = sync_w { let _ = nix::unistd::close(sw); }
+            if let Some(urr) = userns_ready_r { let _ = nix::unistd::close(urr); }
 
             // Join cgroup
             if let Some(ref cg) = config.cgroup_path {
@@ -644,6 +658,12 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
 
             if let Err(e) = nix::sched::unshare(ns_flags) {
                 init_fatal(err_w, &format!("unshare failed: {}", e));
+            }
+
+            // Signal parent that userns is ready (parent is blocked on read)
+            if let Some(urw) = userns_ready_w {
+                let _ = nix::unistd::write(borrow(urw), b"R");
+                let _ = nix::unistd::close(urw);
             }
 
             // Wait for UID mapping from parent
@@ -686,7 +706,7 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
                     unsafe { libc::_exit(code) };
                 }
             }
-            unreachable!();
+            // All child branches diverge (child_init→exec or _exit), never returns.
         }
         Ok(ForkResult::Parent { child }) => {
             // === PARENT: Phase 1 complete (fork done) ===
@@ -701,19 +721,21 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
             }
             let _ = nix::unistd::close(signal_w);
             let _ = nix::unistd::close(err_w);
+            if let Some(urw) = userns_ready_w { let _ = nix::unistd::close(urw); }
 
             // UID/GID mapping
             if let Some(sw) = sync_w {
-                let my_userns = std::fs::read_link("/proc/self/ns/user").ok();
-                for _ in 0..1000 {
-                    if let Ok(child_userns) = std::fs::read_link(format!("/proc/{}/ns/user", child_pid)) {
-                        if my_userns.as_ref() != Some(&child_userns) { break; }
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                // Wait for child to signal userns ready (via userns_ready pipe).
+                // This blocks until child writes 1 byte after unshare — typically < 0.1ms.
+                if let Some(urr) = userns_ready_r {
+                    let mut buf = [0u8; 1];
+                    let _ = unistd::read(borrow(urr), &mut buf);
+                    let _ = nix::unistd::close(urr);
                 }
 
                 let outer_uid = rustix::process::getuid().as_raw();
                 let outer_gid = rustix::process::getgid().as_raw();
+                let pid_s = child_pid.to_string();
 
                 if let Some((_, sub_start, sub_count)) = config.subuid_range {
                     let pid_s = child_pid.to_string();
@@ -736,7 +758,6 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
                         _ => {}
                     }
                 } else {
-                    let pid_s = child_pid.to_string();
                     if let Err(e) = std::fs::write(format!("/proc/{}/setgroups", pid_s), "deny\n") {
                         log::warn!("write setgroups failed: {}", e);
                     }
@@ -860,9 +881,7 @@ fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
         nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
     );
 
-    // Exec via nix
-    if let Err(e) = unistd::execve(&exec_args[0], &exec_args, &env_vec) {
-        init_fatal(err_w, &format!("exec {} failed: {}", config.shell, e));
-    }
-    unreachable!();
+    // Exec via nix — on success this never returns; on failure we report and exit.
+    let e = unistd::execve(&exec_args[0], &exec_args, &env_vec).unwrap_err();
+    init_fatal(err_w, &format!("exec {} failed: {}", config.shell, e));
 }

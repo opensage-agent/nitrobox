@@ -11,19 +11,47 @@ pub mod security;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pyfunction};
 use std::collections::HashMap;
+
+// ======================================================================
+// PyO3 types
+// ======================================================================
+
+/// Result of spawning a sandbox process.
+#[gen_stub_pyclass]
+#[pyclass(get_all, frozen, skip_from_py_object)]
+#[derive(Clone)]
+pub struct PySpawnResult {
+    /// PID of the sandbox shell process.
+    pub pid: i32,
+    /// File descriptor for writing to the shell's stdin.
+    pub stdin_fd: i32,
+    /// File descriptor for reading the shell's stdout.
+    pub stdout_fd: i32,
+    /// File descriptor for reading the signal pipe (exit codes).
+    pub signal_r_fd: i32,
+    /// The fd number of the signal write end *inside* the child process.
+    pub signal_w_fd_num: i32,
+    /// PTY master fd (only set when tty=True).
+    pub master_fd: Option<i32>,
+    /// pidfd for the shell process (None if kernel doesn't support it).
+    pub pidfd: Option<i32>,
+}
 
 // ======================================================================
 // PyO3 bindings
 // ======================================================================
 
 /// Check if kernel supports new mount API with lowerdir+ (>= 6.8).
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_check_new_mount_api() -> bool {
     mount::check_new_mount_api()
 }
 
 /// Mount overlayfs, auto-selecting new mount API or legacy mount(2).
+#[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (lowerdir_spec, upper_dir, work_dir, target))]
 fn py_mount_overlay(
@@ -37,6 +65,7 @@ fn py_mount_overlay(
 }
 
 /// Build seccomp BPF bytecode as raw bytes.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_build_seccomp_bpf(py: Python<'_>) -> PyResult<Py<PyBytes>> {
     let bpf = security::build_seccomp_bpf();
@@ -44,6 +73,7 @@ fn py_build_seccomp_bpf(py: Python<'_>) -> PyResult<Py<PyBytes>> {
 }
 
 /// Apply seccomp-bpf filter. Raises OSError on failure.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_apply_seccomp_filter() -> PyResult<()> {
     security::apply_seccomp_filter()
@@ -51,6 +81,7 @@ fn py_apply_seccomp_filter() -> PyResult<()> {
 }
 
 /// Drop capabilities except Docker defaults + extra_keep.
+#[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (extra_keep = None))]
 fn py_drop_capabilities(extra_keep: Option<Vec<u32>>) -> PyResult<u32> {
@@ -59,6 +90,7 @@ fn py_drop_capabilities(extra_keep: Option<Vec<u32>>) -> PyResult<u32> {
 }
 
 /// Apply Landlock filesystem + network restrictions.
+#[gen_stub_pyfunction]
 #[pyfunction]
 #[pyo3(signature = (read_paths = None, write_paths = None, allowed_tcp_ports = None, strict = false))]
 fn py_apply_landlock(
@@ -77,30 +109,35 @@ fn py_apply_landlock(
 }
 
 /// Query kernel Landlock ABI version (0 if unavailable).
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_landlock_abi_version() -> u32 {
     security::landlock_abi_version()
 }
 
 /// Create a pidfd for the given PID. Returns fd or None.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_pidfd_open(pid: i32) -> Option<i32> {
     pidfd::pidfd_open(pid).ok()
 }
 
 /// Send signal to process via pidfd. Returns True on success.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_pidfd_send_signal(pidfd: i32, sig: i32) -> bool {
     pidfd::pidfd_send_signal(pidfd, sig).is_ok()
 }
 
 /// Check if process behind pidfd is alive.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_pidfd_is_alive(pidfd: i32) -> bool {
     pidfd::pidfd_is_alive(pidfd)
 }
 
 /// Hint kernel to reclaim (swap out) sandbox process memory via MADV_COLD.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_process_madvise_cold(pidfd: i32) -> PyResult<bool> {
     match pidfd::process_madvise_cold(pidfd) {
@@ -115,12 +152,14 @@ fn py_process_madvise_cold(pidfd: i32) -> PyResult<bool> {
 // --- cgroup bindings ---
 
 /// Check if cgroup v2 is available.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_cgroup_v2_available() -> bool {
     cgroup::cgroup_v2_available()
 }
 
 /// Create a cgroup for the sandbox. Returns the cgroup path.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_create_cgroup(name: &str) -> PyResult<String> {
     cgroup::create_cgroup(name)
@@ -129,6 +168,7 @@ fn py_create_cgroup(name: &str) -> PyResult<String> {
 }
 
 /// Apply resource limits to a cgroup.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_apply_cgroup_limits(cgroup_path: &str, limits: HashMap<String, String>) -> PyResult<()> {
     let path = std::path::Path::new(cgroup_path);
@@ -139,6 +179,7 @@ fn py_apply_cgroup_limits(cgroup_path: &str, limits: HashMap<String, String>) ->
 }
 
 /// Move a process into a cgroup.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_cgroup_add_process(cgroup_path: &str, pid: u32) -> PyResult<()> {
     cgroup::add_process(std::path::Path::new(cgroup_path), pid)
@@ -146,6 +187,7 @@ fn py_cgroup_add_process(cgroup_path: &str, pid: u32) -> PyResult<()> {
 }
 
 /// Kill all processes in a cgroup and remove it.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_cleanup_cgroup(cgroup_path: &str) -> PyResult<()> {
     cgroup::cleanup_cgroup(std::path::Path::new(cgroup_path))
@@ -153,6 +195,7 @@ fn py_cleanup_cgroup(cgroup_path: &str) -> PyResult<()> {
 }
 
 /// Convert Docker CPU shares to cgroup v2 weight.
+#[gen_stub_pyfunction]
 #[pyfunction]
 fn py_convert_cpu_shares(shares: u64) -> u64 {
     cgroup::convert_cpu_shares(shares)
@@ -224,19 +267,10 @@ fn get_env(d: &Bound<'_, PyDict>, key: &str) -> PyResult<HashMap<String, String>
     }
 }
 
-/// Spawn a sandbox process. Takes a config dict, returns a result dict.
-///
-/// Config keys: rootfs, shell, working_dir, env, rootful, lowerdir_spec,
-/// upper_dir, work_dir, userns, net_isolate, net_ns, shared_userns,
-/// map_root_user, subuid_range, time_ns, seccomp, cap_add, hostname,
-/// read_only, landlock_read_paths, landlock_write_paths, landlock_ports,
-/// landlock_strict, volumes, devices, shm_size, tmpfs_mounts,
-/// cgroup_path, entrypoint, tty, env_dir.
-///
-/// Returns dict: pid, stdin_fd, stdout_fd, signal_r_fd, signal_w_fd_num,
-/// master_fd (optional), pidfd (optional).
+/// Spawn a sandbox process. Takes a config dict, returns a PySpawnResult.
+#[gen_stub_pyfunction]
 #[pyfunction]
-fn py_spawn_sandbox<'py>(py: Python<'py>, config: &Bound<'py, PyDict>) -> PyResult<Bound<'py, PyDict>> {
+fn py_spawn_sandbox(config: &Bound<'_, PyDict>) -> PyResult<PySpawnResult> {
     let cfg = init::SandboxSpawnConfig {
         rootfs: get_str(config, "rootfs", "/")?,
         shell: get_str(config, "shell", "/bin/sh")?,
@@ -250,9 +284,7 @@ fn py_spawn_sandbox<'py>(py: Python<'py>, config: &Bound<'py, PyDict>) -> PyResu
         net_isolate: get_bool(config, "net_isolate", false)?,
         net_ns: get_opt_str(config, "net_ns")?,
         shared_userns: get_opt_str(config, "shared_userns")?,
-        map_root_user: get_bool(config, "map_root_user", false)?,
         subuid_range: get_opt_subuid(config, "subuid_range")?,
-        time_ns: get_bool(config, "time_ns", false)?,
         seccomp: get_bool(config, "seccomp", true)?,
         cap_add: get_vec_u32(config, "cap_add")?,
         hostname: get_opt_str(config, "hostname")?,
@@ -274,18 +306,18 @@ fn py_spawn_sandbox<'py>(py: Python<'py>, config: &Bound<'py, PyDict>) -> PyResu
         env_dir: get_opt_str(config, "env_dir")?,
     };
 
-    let result = init::spawn_sandbox(&cfg)
+    let r = init::spawn_sandbox(&cfg)
         .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))?;
 
-    let dict = PyDict::new(py);
-    dict.set_item("pid", result.pid)?;
-    dict.set_item("stdin_fd", result.stdin_fd)?;
-    dict.set_item("stdout_fd", result.stdout_fd)?;
-    dict.set_item("signal_r_fd", result.signal_r_fd)?;
-    dict.set_item("signal_w_fd_num", result.signal_w_fd_num)?;
-    dict.set_item("master_fd", result.master_fd)?;
-    dict.set_item("pidfd", result.pidfd)?;
-    Ok(dict)
+    Ok(PySpawnResult {
+        pid: r.pid,
+        stdin_fd: r.stdin_fd,
+        stdout_fd: r.stdout_fd,
+        signal_r_fd: r.signal_r_fd,
+        signal_w_fd_num: r.signal_w_fd_num,
+        master_fd: r.master_fd.map(|fd| fd as i32),
+        pidfd: r.pidfd.map(|fd| fd as i32),
+    })
 }
 
 // ======================================================================
@@ -295,6 +327,9 @@ fn py_spawn_sandbox<'py>(py: Python<'py>, config: &Bound<'py, PyDict>) -> PyResu
 /// agentdocker-lite Rust core: direct syscall interface for namespace sandboxing.
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // types
+    m.add_class::<PySpawnResult>()?;
+
     // mount
     m.add_function(wrap_pyfunction!(py_check_new_mount_api, m)?)?;
     m.add_function(wrap_pyfunction!(py_mount_overlay, m)?)?;
@@ -325,3 +360,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     Ok(())
 }
+
+// Generates stub_info() for the stub_gen binary.
+pyo3_stub_gen::define_stub_info_gatherer!(stub_info);

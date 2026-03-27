@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from agentdocker_lite.backends.base import SandboxBase, SandboxConfig
+from agentdocker_lite.backends.base import SandboxBase, SandboxConfig, cap_names_to_numbers
 from agentdocker_lite._shell import _PersistentShell
 
 logger = logging.getLogger(__name__)
@@ -185,27 +185,44 @@ class RootfulSandbox(SandboxBase):
         self._shell = self._detect_shell()
         self._cached_env = self._build_env()
 
+        from agentdocker_lite._shell import SpawnConfig
+        spawn_cfg: SpawnConfig = {
+            "rootfs": str(self._rootfs),
+            "shell": self._shell,
+            "working_dir": config.working_dir or "/",
+            "env": self._cached_env,
+            "rootful": True,
+            "userns": False,
+            "net_isolate": config.net_isolate,
+            "net_ns": config.net_ns,
+            "shared_userns": None,
+            "subuid_range": None,
+            "seccomp": config.seccomp,
+            "cap_add": cap_names_to_numbers(config.cap_add) if config.cap_add else [],
+            "hostname": config.hostname,
+            "read_only": config.read_only,
+            "entrypoint": config.entrypoint or [],
+            "tty": config.tty,
+            "lowerdir_spec": None,
+            "upper_dir": None,
+            "work_dir": None,
+            "volumes": [],
+            "devices": config.devices or [],
+            "shm_size": None,
+            "tmpfs_mounts": [],
+            "landlock_read_paths": ll_read,
+            "landlock_write_paths": ll_write,
+            "landlock_ports": ll_ports,
+            "landlock_strict": ll_strict,
+            "cgroup_path": str(self._cgroup_path) if self._cgroup_path else None,
+            "port_map": [],
+            "pasta_bin": None,
+            "ipv6": False,
+            "env_dir": None,
+        }
         t3 = time.monotonic()
         self._persistent_shell = _PersistentShell(
-            rootfs=self._rootfs,
-            shell=self._shell,
-            env=self._cached_env,
-            working_dir=config.working_dir or "/",
-            cgroup_path=self._cgroup_path,
-            tty=config.tty,
-            net_isolate=config.net_isolate,
-            net_ns=config.net_ns,
-            seccomp=config.seccomp,
-            hostname=config.hostname,
-            read_only=config.read_only,
-            entrypoint=config.entrypoint,
-            rootful=True,
-            devices=config.devices or [],
-            cap_add=cap_names_to_numbers(config.cap_add) if config.cap_add else [],
-            landlock_read_paths=ll_read,
-            landlock_write_paths=ll_write,
-            landlock_ports=ll_ports,
-            landlock_strict=ll_strict,
+            spawn_cfg, ulimits=config.ulimits or None,
         )
         shell_ms = (time.monotonic() - t3) * 1000
 
@@ -304,6 +321,7 @@ class RootfulSandbox(SandboxBase):
 
             # Re-create working dir in upper
             if self._config.working_dir and self._config.working_dir != "/":
+                assert self._upper_dir is not None
                 wd = self._upper_dir / self._config.working_dir.lstrip("/")
                 wd.mkdir(parents=True, exist_ok=True)
 
@@ -543,6 +561,7 @@ class RootfulSandbox(SandboxBase):
     def _setup_overlay(self):
         from agentdocker_lite._mount import mount_overlay
 
+        assert self._upper_dir is not None and self._work_dir is not None and self._rootfs is not None
         for d in (self._upper_dir, self._work_dir, self._rootfs):
             d.mkdir(parents=True, exist_ok=True)
 
@@ -861,7 +880,7 @@ class RootfulSandbox(SandboxBase):
         the host user, so after chown all files become deletable.
         """
         shell = self._persistent_shell
-        if not self._userns or not getattr(shell, '_subuid_range', None):
+        if not self._userns or not shell._config.get("subuid_range"):
             return
         if not shell.alive:
             return
@@ -1079,6 +1098,7 @@ class RootfulSandbox(SandboxBase):
         fall back to base rootfs (original image files).
         """
         if self._userns:
+            assert self._upper_dir is not None and self._base_rootfs is not None
             stripped = container_path.lstrip("/")
             upper = self._upper_dir / stripped
             if upper.exists():
@@ -1088,6 +1108,7 @@ class RootfulSandbox(SandboxBase):
                 return base
             # Return upper as default (caller checks existence)
             return upper
+        assert self._rootfs is not None
         return self._rootfs / container_path.lstrip("/")
 
     def _host_path_write(self, container_path: str) -> Path:
@@ -1097,5 +1118,7 @@ class RootfulSandbox(SandboxBase):
         picks up the change.
         """
         if self._userns:
+            assert self._upper_dir is not None
             return self._upper_dir / container_path.lstrip("/")
+        assert self._rootfs is not None
         return self._rootfs / container_path.lstrip("/")

@@ -11,109 +11,40 @@ use std::os::unix::io::RawFd;
 use std::path::Path;
 
 // ======================================================================
-// Capabilities — via rustix
+// Capabilities — via rustix CapabilitySet
 // ======================================================================
 
-use rustix::thread::Capability;
+use rustix::thread::CapabilitySet;
 
-/// Docker default: capabilities to KEEP (everything else is dropped).
-const DOCKER_DEFAULT_CAPS: &[Capability] = &[
-    Capability::ChangeOwnership,        // CAP_CHOWN (0)
-    Capability::DACOverride,            // CAP_DAC_OVERRIDE (1)
-    Capability::FileOwner,              // CAP_FOWNER (3)
-    Capability::FileSetID,              // CAP_FSETID (4)
-    Capability::Kill,                   // CAP_KILL (5)
-    Capability::SetGroupID,             // CAP_SETGID (6)
-    Capability::SetUserID,              // CAP_SETUID (7)
-    Capability::SetPermittedCapabilities, // CAP_SETPCAP (8)
-    Capability::NetBindService,         // CAP_NET_BIND_SERVICE (10)
-    Capability::SystemChangeRoot,       // CAP_SYS_CHROOT (18)
-    Capability::MakeNode,               // CAP_MKNOD (27)
-    Capability::AuditWrite,             // CAP_AUDIT_WRITE (29)
-    Capability::SetFileCapabilities,    // CAP_SETFCAP (31)
+/// Docker default: capability numbers to KEEP (everything else is dropped).
+const DOCKER_DEFAULT_CAPS: &[u32] = &[
+    0,  // CAP_CHOWN
+    1,  // CAP_DAC_OVERRIDE
+    3,  // CAP_FOWNER
+    4,  // CAP_FSETID
+    5,  // CAP_KILL
+    6,  // CAP_SETGID
+    7,  // CAP_SETUID
+    8,  // CAP_SETPCAP
+    10, // CAP_NET_BIND_SERVICE
+    18, // CAP_SYS_CHROOT
+    27, // CAP_MKNOD
+    29, // CAP_AUDIT_WRITE
+    31, // CAP_SETFCAP
 ];
 
 const CAP_LAST_CAP: u32 = 41;
-
-/// Map capability number to rustix Capability enum.
-/// Returns None for numbers that don't have a corresponding enum variant.
-fn cap_from_u32(n: u32) -> Option<Capability> {
-    // Exhaustive match — all variants defined in rustix 1.1
-    match n {
-        0 => Some(Capability::ChangeOwnership),
-        1 => Some(Capability::DACOverride),
-        2 => Some(Capability::DACReadSearch),
-        3 => Some(Capability::FileOwner),
-        4 => Some(Capability::FileSetID),
-        5 => Some(Capability::Kill),
-        6 => Some(Capability::SetGroupID),
-        7 => Some(Capability::SetUserID),
-        8 => Some(Capability::SetPermittedCapabilities),
-        9 => Some(Capability::LinuxImmutable),
-        10 => Some(Capability::NetBindService),
-        11 => Some(Capability::NetBroadcast),
-        12 => Some(Capability::NetAdmin),
-        13 => Some(Capability::NetRaw),
-        14 => Some(Capability::IPCLock),
-        15 => Some(Capability::IPCOwner),
-        16 => Some(Capability::SystemModule),
-        17 => Some(Capability::SystemRawIO),
-        18 => Some(Capability::SystemChangeRoot),
-        19 => Some(Capability::SystemProcessTrace),
-        20 => Some(Capability::SystemProcessAccounting),
-        21 => Some(Capability::SystemAdmin),
-        22 => Some(Capability::SystemBoot),
-        23 => Some(Capability::SystemNice),
-        24 => Some(Capability::SystemResource),
-        25 => Some(Capability::SystemTime),
-        26 => Some(Capability::SystemTTYConfig),
-        27 => Some(Capability::MakeNode),
-        28 => Some(Capability::Lease),
-        29 => Some(Capability::AuditWrite),
-        30 => Some(Capability::AuditControl),
-        31 => Some(Capability::SetFileCapabilities),
-        32 => Some(Capability::MACOverride),
-        33 => Some(Capability::MACAdmin),
-        34 => Some(Capability::SystemLog),
-        35 => Some(Capability::WakeAlarm),
-        36 => Some(Capability::BlockSuspend),
-        37 => Some(Capability::AuditRead),
-        38 => Some(Capability::PerformanceMonitoring),
-        39 => Some(Capability::BerkeleyPacketFilters),
-        40 => Some(Capability::CheckpointRestore),
-        _ => None, // Future capabilities — dropped via raw prctl fallback
-    }
-}
-
-fn should_keep(cap_num: u32, extra_keep: &[u32]) -> bool {
-    if extra_keep.contains(&cap_num) {
-        return true;
-    }
-    for default_cap in DOCKER_DEFAULT_CAPS {
-        if *default_cap as u32 == cap_num {
-            return true;
-        }
-    }
-    false
-}
 
 /// Drop all capabilities except Docker defaults + extra_keep from bounding set.
 pub fn drop_capabilities(extra_keep: &[u32]) -> io::Result<u32> {
     let mut dropped: u32 = 0;
     for cap_num in 0..=CAP_LAST_CAP {
-        if should_keep(cap_num, extra_keep) {
+        if DOCKER_DEFAULT_CAPS.contains(&cap_num) || extra_keep.contains(&cap_num) {
             continue;
         }
-        if let Some(cap) = cap_from_u32(cap_num) {
-            if rustix::thread::remove_capability_from_bounding_set(cap).is_ok() {
-                dropped += 1;
-            }
-        } else {
-            // Capability not in rustix enum — use raw prctl
-            let ret = unsafe { libc::prctl(libc::PR_CAPBSET_DROP, cap_num as libc::c_ulong, 0, 0, 0) };
-            if ret == 0 {
-                dropped += 1;
-            }
+        let cap = CapabilitySet::from_bits_retain(1u64 << cap_num);
+        if rustix::thread::remove_capability_from_bounding_set(cap).is_ok() {
+            dropped += 1;
         }
     }
     log::debug!("Dropped {} capabilities from bounding set", dropped);

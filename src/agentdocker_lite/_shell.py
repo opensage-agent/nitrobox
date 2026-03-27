@@ -13,9 +13,68 @@ import select
 import shlex
 import threading
 import time
-from typing import Optional
+from typing import Optional, TypedDict
 
 logger = logging.getLogger(__name__)
+
+
+# ======================================================================
+# Typed dicts for the Rust FFI boundary
+# ======================================================================
+
+class SpawnConfig(TypedDict, total=False):
+    """Config dict passed to ``_core.py_spawn_sandbox()``."""
+
+    # Required
+    rootfs: str
+    shell: str
+    working_dir: str
+    env: dict[str, str]
+
+    # Namespace
+    rootful: bool
+    userns: bool
+    net_isolate: bool
+    net_ns: Optional[str]
+    shared_userns: Optional[str]
+    subuid_range: Optional[tuple[int, int, int]]
+
+    # Filesystem
+    lowerdir_spec: Optional[str]
+    upper_dir: Optional[str]
+    work_dir: Optional[str]
+    read_only: bool
+    volumes: list[str]
+    devices: list[str]
+    shm_size: Optional[int]
+    tmpfs_mounts: list[str]
+
+    # Security
+    seccomp: bool
+    cap_add: list[int]
+    hostname: Optional[str]
+    landlock_read_paths: list[str]
+    landlock_write_paths: list[str]
+    landlock_ports: list[int]
+    landlock_strict: bool
+
+    # Process
+    cgroup_path: Optional[str]
+    entrypoint: list[str]
+    tty: bool
+
+    # Network
+    port_map: list[str]
+    pasta_bin: Optional[str]
+    ipv6: bool
+
+    # Internal
+    env_dir: Optional[str]
+
+
+    # SpawnResult is a Rust pyclass (agentdocker_lite._core.PySpawnResult)
+    # with typed attributes: pid, stdin_fd, stdout_fd, signal_r_fd,
+    # signal_w_fd_num, master_fd, pidfd.
 
 
 class _PersistentShell:
@@ -29,77 +88,12 @@ class _PersistentShell:
 
     def __init__(
         self,
-        rootfs,
-        shell: str,
-        env: dict[str, str],
-        working_dir: str = "/",
-        cgroup_path=None,
-        tty: bool = False,
-        net_isolate: bool = False,
-        net_ns: Optional[str] = None,
-        seccomp: bool = True,
-        hostname: Optional[str] = None,
-        read_only: bool = False,
-        entrypoint: Optional[list[str]] = None,
-        subuid_range: Optional[tuple[int, int, int]] = None,
-        shared_userns: Optional[str] = None,
+        config: SpawnConfig,
+        *,
         ulimits: Optional[dict[str, tuple[int, int]]] = None,
-        # Rootful mode (pivot_root) vs rootless (chroot)
-        rootful: bool = False,
-        # Overlay config (rootless)
-        lowerdir_spec: Optional[str] = None,
-        upper_dir: Optional[str] = None,
-        work_dir: Optional[str] = None,
-        # Volumes, devices, tmpfs
-        volumes: Optional[list[str]] = None,
-        devices: Optional[list[str]] = None,
-        shm_size: Optional[int] = None,
-        tmpfs_mounts: Optional[list[str]] = None,
-        # Security
-        cap_add: Optional[list[int]] = None,
-        landlock_read_paths: Optional[list[str]] = None,
-        landlock_write_paths: Optional[list[str]] = None,
-        landlock_ports: Optional[list[int]] = None,
-        landlock_strict: bool = False,
-        # Port mapping
-        port_map: Optional[list[str]] = None,
-        pasta_bin: Optional[str] = None,
-        ipv6: bool = False,
-        # Internal
-        env_dir: Optional[str] = None,
     ):
-        self._rootfs = rootfs
-        self._shell = shell
-        self._env = env
-        self._working_dir = working_dir
-        self._cgroup_path = cgroup_path
-        self._tty = tty
-        self._net_isolate = net_isolate
-        self._net_ns = net_ns
-        self._seccomp = seccomp
-        self._hostname = hostname
-        self._read_only = read_only
-        self._entrypoint = entrypoint or []
-        self._subuid_range = subuid_range
-        self._shared_userns = shared_userns
+        self._config = config
         self._ulimits = ulimits or {}
-        self._rootful = rootful
-        self._lowerdir_spec = lowerdir_spec
-        self._upper_dir = upper_dir
-        self._work_dir = work_dir
-        self._volumes = volumes or []
-        self._devices = devices or []
-        self._shm_size = shm_size
-        self._tmpfs_mounts = tmpfs_mounts or []
-        self._cap_add = cap_add or []
-        self._landlock_read_paths = landlock_read_paths or []
-        self._landlock_write_paths = landlock_write_paths or []
-        self._landlock_ports = landlock_ports or []
-        self._landlock_strict = landlock_strict
-        self._port_map = port_map or []
-        self._pasta_bin = pasta_bin
-        self._ipv6 = ipv6
-        self._env_dir = env_dir
 
         # Process state (set by start())
         self.pid: Optional[int] = None
@@ -122,57 +116,17 @@ class _PersistentShell:
 
         from agentdocker_lite._core import py_spawn_sandbox
 
-        config = {
-            "rootfs": str(self._rootfs),
-            "shell": self._shell,
-            "working_dir": self._working_dir,
-            "env": self._env,
-            "rootful": self._rootful,
-            "userns": self._subuid_range is not None
-            or self._shared_userns is not None
-            or (not self._rootful),
-            "net_isolate": self._net_isolate,
-            "net_ns": self._net_ns,
-            "shared_userns": self._shared_userns,
-            "map_root_user": self._subuid_range is None
-            and self._shared_userns is None
-            and not self._rootful,
-            "subuid_range": self._subuid_range,
-            "seccomp": self._seccomp,
-            "cap_add": self._cap_add,
-            "hostname": self._hostname,
-            "read_only": self._read_only,
-            "entrypoint": self._entrypoint,
-            "tty": self._tty,
-            "lowerdir_spec": self._lowerdir_spec,
-            "upper_dir": self._upper_dir,
-            "work_dir": self._work_dir,
-            "volumes": self._volumes,
-            "devices": self._devices,
-            "shm_size": self._shm_size,
-            "tmpfs_mounts": self._tmpfs_mounts,
-            "landlock_read_paths": self._landlock_read_paths,
-            "landlock_write_paths": self._landlock_write_paths,
-            "landlock_ports": self._landlock_ports,
-            "landlock_strict": self._landlock_strict,
-            "cgroup_path": str(self._cgroup_path) if self._cgroup_path else None,
-            "port_map": self._port_map,
-            "pasta_bin": self._pasta_bin,
-            "ipv6": self._ipv6,
-            "env_dir": self._env_dir,
-        }
+        result = py_spawn_sandbox(self._config)
 
-        result = py_spawn_sandbox(config)
+        self.pid = result.pid
+        self._stdin_fd = result.stdin_fd
+        self._stdout_fd = result.stdout_fd
+        self._signal_r = result.signal_r_fd
+        self._signal_fd = result.signal_w_fd_num
+        self._master_fd = result.master_fd
+        self._pidfd = result.pidfd
 
-        self.pid = result["pid"]
-        self._stdin_fd = result["stdin_fd"]
-        self._stdout_fd = result["stdout_fd"]
-        self._signal_r = result["signal_r_fd"]
-        self._signal_fd = result["signal_w_fd_num"]
-        self._master_fd = result.get("master_fd")
-        self._pidfd = result.get("pidfd")
-
-        if self._tty and self._master_fd is not None:
+        if self._config.get("tty") and self._master_fd is not None:
             # In TTY mode, stdin and stdout go through master_fd
             self._stdin_fd = self._master_fd
             self._stdout_fd = self._master_fd
@@ -190,11 +144,13 @@ class _PersistentShell:
                 ulimit_lines += f"ulimit -H {flag} {hard} 2>/dev/null\n"
                 ulimit_lines += f"ulimit -S {flag} {soft} 2>/dev/null\n"
 
+        working_dir = self._config.get("working_dir", "/")
+
         # Send init script to shell (cd + signal ready)
         init_script = (
             "PS1='' PS2=''\n"
             + ulimit_lines
-            + f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
+            + f"cd {shlex.quote(working_dir)} 2>/dev/null\n"
             f"echo 0 >&{self._signal_fd}\n"
         )
         self._write_input(init_script.encode())
@@ -230,17 +186,21 @@ class _PersistentShell:
                 except OSError:
                     pass
 
+            rootfs = self._config.get("rootfs", "?")
+            shell = self._config.get("shell", "?")
             raise RuntimeError(
                 f"Persistent shell failed to start "
-                f"(rootfs={self._rootfs}, shell={self._shell}).{detail}"
+                f"(rootfs={rootfs}, shell={shell}).{detail}"
             )
 
-        ns_flags = "user,pid,mount" if not self._rootful else "pid,mount"
-        if self._net_isolate:
+        rootful = self._config.get("rootful", False)
+        ns_flags = "user,pid,mount" if not rootful else "pid,mount"
+        if self._config.get("net_isolate"):
             ns_flags += ",net"
         logger.debug(
             "Persistent shell started: pid=%d rootfs=%s ns=[%s] tty=%s",
-            self.pid, self._rootfs, ns_flags, self._tty,
+            self.pid, self._config.get("rootfs"), ns_flags,
+            self._config.get("tty"),
         )
 
     def kill(self) -> None:
@@ -288,8 +248,9 @@ class _PersistentShell:
                 logger.warning("Persistent shell died, restarting")
                 self.start()
 
+            working_dir = self._config.get("working_dir", "/")
             script = (
-                f"cd {shlex.quote(self._working_dir)} 2>/dev/null\n"
+                f"cd {shlex.quote(working_dir)} 2>/dev/null\n"
                 f"bash -c {shlex.quote(command)} </dev/null 2>&1\n"
                 f"echo $? >&{self._signal_fd}\n"
             )
@@ -313,7 +274,7 @@ class _PersistentShell:
 
     def write_stdin(self, data: str | bytes) -> None:
         """Write raw data to the shell's stdin (TTY mode only)."""
-        if not self._tty:
+        if not self._config.get("tty"):
             raise RuntimeError("write_stdin() requires tty=True")
         if isinstance(data, str):
             data = data.encode()
@@ -334,7 +295,7 @@ class _PersistentShell:
         return True
 
     @property
-    def _stdout_read_fd(self) -> int:
+    def _stdout_read_fd(self) -> Optional[int]:
         """File descriptor to read command output from."""
         return self._stdout_fd
 
@@ -363,6 +324,7 @@ class _PersistentShell:
         """Read stdout until the signal fd fires with the exit code."""
         deadline = time.monotonic() + timeout if timeout else None
         stdout_fd = self._stdout_read_fd
+        assert stdout_fd is not None, "stdout fd not set"
         signal_fd = self._signal_r
         buf = b""
         parts: list[str] = []

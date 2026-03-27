@@ -1393,7 +1393,8 @@ class SandboxBase(abc.ABC):
         pass
 
     def __repr__(self) -> str:
-        return f"Sandbox(name={self._name!r}, fs={self._fs_backend}, rootfs={self._rootfs})"
+        fs = getattr(self, "_fs_backend", "?")
+        return f"Sandbox(name={self._name!r}, fs={fs}, rootfs={self._rootfs})"
 
     # ------------------------------------------------------------------ #
     #  Stale sandbox cleanup                                               #

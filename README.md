@@ -101,6 +101,22 @@ echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/9
 pip install agentdocker-lite
 ```
 
+### Development build
+
+Requires [Rust](https://rustup.rs/) and [maturin](https://www.maturin.rs/):
+
+```bash
+pip install maturin
+maturin develop --release        # build Rust core + install in-place
+pytest tests/                    # run tests
+```
+
+To regenerate type stubs after changing Rust bindings:
+
+```bash
+cargo run --bin stub_gen --release
+```
+
 ## Quick start
 
 ```python

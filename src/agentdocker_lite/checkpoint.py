@@ -41,7 +41,11 @@ from typing import TYPE_CHECKING, Optional
 
 # Lazy-import protobuf to avoid hard dependency at module level.
 # The generated rpc_pb2 lives in _vendor/.
-import agentdocker_lite._vendor.criu_rpc_pb2 as rpc
+from typing import Any
+
+# Protobuf-generated module with dynamic attributes — typed as Any to suppress
+# attribute access errors from type checkers.
+rpc: Any = __import__("agentdocker_lite._vendor.criu_rpc_pb2", fromlist=["criu_rpc_pb2"])
 
 if TYPE_CHECKING:
     from agentdocker_lite.backends.base import SandboxBase
@@ -87,7 +91,7 @@ class _CriuRPC:
     def __init__(self, binary: str):
         self._binary = binary
 
-    def _call(self, req: rpc.criu_req) -> rpc.criu_resp:
+    def _call(self, req: Any) -> Any:
         """Fork+exec ``criu swrk <fd>``, send request, receive response."""
         # Create socketpair: css[0] goes to child, css[1] stays in parent.
         css = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
@@ -134,13 +138,13 @@ class _CriuRPC:
 
         return resp
 
-    def dump(self, opts: rpc.criu_opts) -> rpc.criu_resp:
+    def dump(self, opts: Any) -> Any:
         req = rpc.criu_req()
         req.type = rpc.DUMP
         req.opts.CopyFrom(opts)
         return self._call(req)
 
-    def restore(self, opts: rpc.criu_opts) -> rpc.criu_resp:
+    def restore(self, opts: Any) -> Any:
         req = rpc.criu_req()
         req.type = rpc.RESTORE
         req.opts.CopyFrom(opts)
@@ -275,6 +279,7 @@ class CheckpointManager:
         if not shell.alive:
             raise RuntimeError("Sandbox shell is not running")
         shell_pid = shell.pid
+        assert shell_pid is not None, "shell has no pid"
         init_pid = _find_init_pid(shell_pid)
 
         # 3. Save pipe descriptors (runc approach: readlink fd 0/1/2).
@@ -288,8 +293,8 @@ class CheckpointManager:
             "signal_fd": signal_fd,
             "pipe_fds": pipe_fds,  # ["pipe:[X]", "pipe:[Y]", "pipe:[Y]"]
             "all_pipe_inodes": {str(k): v for k, v in all_pipe_inodes.items()},
-            "tty": shell._tty,
-            "working_dir": shell._working_dir,
+            "tty": shell._config.get("tty", False),
+            "working_dir": shell._config.get("working_dir", "/"),
         }
         # Save pipe_fds as descriptors.json (runc convention).
         (criu_dir / "descriptors.json").write_text(json.dumps(pipe_fds))

@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import os
-import shlex
 import shutil
 import subprocess
 import time
@@ -227,40 +226,45 @@ class RootlessSandbox(RootfulSandbox):
         subuid_range = self._detect_subuid_range()
 
         # --- start persistent shell (Rust init chain) ---------------------
+        from agentdocker_lite._shell import SpawnConfig
         shell_net_isolate = config.net_isolate and not config.port_map and not config.net_ns
+        spawn_cfg: SpawnConfig = {
+            "rootfs": str(self._rootfs),
+            "shell": self._shell,
+            "working_dir": config.working_dir or "/",
+            "env": self._cached_env,
+            "rootful": False,
+            "userns": True,
+            "net_isolate": shell_net_isolate,
+            "net_ns": config.net_ns,
+            "shared_userns": config.shared_userns,
+            "subuid_range": subuid_range,
+            "seccomp": config.seccomp,
+            "cap_add": cap_add_nums,
+            "hostname": config.hostname,
+            "read_only": config.read_only,
+            "entrypoint": config.entrypoint or [],
+            "tty": config.tty,
+            "lowerdir_spec": self._lowerdir_spec,
+            "upper_dir": str(self._upper_dir),
+            "work_dir": str(self._work_dir),
+            "volumes": list(config.volumes) if config.volumes else [],
+            "devices": config.devices or [],
+            "shm_size": int(config.shm_size) if config.shm_size else None,
+            "tmpfs_mounts": list(config.tmpfs) if config.tmpfs else [],
+            "landlock_read_paths": ll_read,
+            "landlock_write_paths": ll_write,
+            "landlock_ports": ll_ports,
+            "landlock_strict": ll_strict,
+            "cgroup_path": None,
+            "port_map": list(config.port_map) if config.port_map else [],
+            "pasta_bin": self._find_pasta_bin(),
+            "ipv6": config.ipv6 if hasattr(config, 'ipv6') else False,
+            "env_dir": str(self._env_dir),
+        }
         t0 = time.monotonic()
         self._persistent_shell = _PersistentShell(
-            rootfs=self._rootfs,
-            shell=self._shell,
-            env=self._cached_env,
-            working_dir=config.working_dir or "/",
-            tty=config.tty,
-            net_isolate=shell_net_isolate,
-            net_ns=config.net_ns,
-            seccomp=config.seccomp,
-            hostname=config.hostname,
-            read_only=config.read_only,
-            subuid_range=subuid_range,
-            shared_userns=config.shared_userns,
-            ulimits=config.ulimits or None,
-            entrypoint=config.entrypoint,
-            rootful=False,
-            lowerdir_spec=self._lowerdir_spec,
-            upper_dir=str(self._upper_dir),
-            work_dir=str(self._work_dir),
-            volumes=list(config.volumes) if config.volumes else [],
-            devices=config.devices or [],
-            shm_size=int(config.shm_size) if config.shm_size else None,
-            tmpfs_mounts=list(config.tmpfs) if config.tmpfs else [],
-            cap_add=cap_add_nums,
-            landlock_read_paths=ll_read,
-            landlock_write_paths=ll_write,
-            landlock_ports=ll_ports,
-            landlock_strict=ll_strict,
-            env_dir=str(self._env_dir),
-            port_map=list(config.port_map) if config.port_map else [],
-            pasta_bin=self._find_pasta_bin(),
-            ipv6=config.ipv6 if hasattr(config, 'ipv6') else False,
+            spawn_cfg, ulimits=config.ulimits or None,
         )
         shell_ms = (time.monotonic() - t0) * 1000
 
@@ -309,9 +313,13 @@ class RootlessSandbox(RootfulSandbox):
             return "pasta"
         return None
 
-    @staticmethod
-    def _check_prerequisites_userns() -> None:
-        """Check user namespace prerequisites."""
+    _prereq_checked = False
+
+    @classmethod
+    def _check_prerequisites_userns(cls) -> None:
+        """Check user namespace prerequisites (cached after first success)."""
+        if cls._prereq_checked:
+            return
         if shutil.which("unshare") is None:
             raise FileNotFoundError(
                 "unshare not found. Install util-linux: apt-get install util-linux"
@@ -328,27 +336,38 @@ class RootlessSandbox(RootfulSandbox):
                 "  sysctl -w kernel.apparmor_restrict_unprivileged_userns=0\n"
                 f"Error: {result.stderr.decode().strip()}"
             )
+        cls._prereq_checked = True
 
-    @staticmethod
-    def _detect_subuid_range() -> Optional[tuple[int, int, int]]:
+    _cached_subuid_range: Optional[tuple[int, int, int]] = None
+    _subuid_detected = False
+
+    @classmethod
+    def _detect_subuid_range(cls) -> Optional[tuple[int, int, int]]:
         """Detect subordinate UID range for full uid mapping in user namespaces.
 
         Checks for newuidmap/newgidmap and /etc/subuid entry for the current user.
         Returns (outer_uid, sub_start, sub_count) if available, None otherwise.
         When None, the sandbox falls back to --map-root-user (only uid 0 mapped).
+
+        Result is cached — subuid config doesn't change during process lifetime.
         """
+        if cls._subuid_detected:
+            return cls._cached_subuid_range
+
         if shutil.which("newuidmap") is None or shutil.which("newgidmap") is None:
             logger.debug(
                 "newuidmap/newgidmap not found. Install uidmap package for full "
                 "uid mapping (enables apt-get, useradd, etc. inside sandbox). "
                 "Falling back to root-only mapping."
             )
+            cls._subuid_detected = True
             return None
 
         import getpass
         try:
             username = getpass.getuser()
         except Exception:
+            cls._subuid_detected = True
             return None
 
         uid = os.getuid()
@@ -371,7 +390,9 @@ class RootlessSandbox(RootfulSandbox):
                             "Full uid mapping available: %s:%d:%d",
                             username, sub_start, sub_count,
                         )
-                        return (uid, sub_start, sub_count)
+                        cls._cached_subuid_range = (uid, sub_start, sub_count)
+                        cls._subuid_detected = True
+                        return cls._cached_subuid_range
         except FileNotFoundError:
             pass
 
@@ -382,4 +403,5 @@ class RootlessSandbox(RootfulSandbox):
             "Falling back to root-only mapping.",
             username, username, 200000, username, 200000,
         )
+        cls._subuid_detected = True
         return None

@@ -8,11 +8,16 @@ description = "Rust core for agentdocker-lite: Linux namespace sandbox syscall i
 
 [lib]
 name = "adl_core"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]  # rlib needed for stub_gen binary
 path = "rust/src/lib.rs"
 
+[[bin]]
+name = "stub_gen"
+path = "rust/src/bin/stub_gen.rs"
+
 [dependencies]
-pyo3 = { version = "0.28", features = ["extension-module"] }
+pyo3 = "0.28"
+pyo3-stub-gen = "0.20"
 nix = { version = "0.31", features = [
     "sched",     # unshare, setns
     "mount",     # mount, umount2

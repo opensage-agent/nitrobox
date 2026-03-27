@@ -30,7 +30,7 @@ from typing import Any, Optional
 
 import yaml
 
-from agentdocker_lite.backends.base import SandboxConfig
+from agentdocker_lite.backends.base import SandboxBase, SandboxConfig
 from agentdocker_lite.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,7 @@ def _substitute(text: str, env: dict[str, str]) -> str:
     def _repl(m: re.Match) -> str:
         if m.group(0) == "$$":
             return "$"
-        name = m.group(1) or m.group(2)
+        name: str = m.group(1) or m.group(2) or ""
         # Handle ${VAR:-default} and ${VAR-default}
         for sep in (":-", "-"):
             if sep in name:
@@ -512,7 +512,7 @@ class ComposeProject:
         self._image_map = self._resolve_image_map()
         self._image_cmds: dict[str, list[str] | None] = {}  # service → image CMD
         self._image_entrypoints: dict[str, list[str] | None] = {}  # service → image ENTRYPOINT
-        self._sandboxes: dict[str, Sandbox] = {}
+        self._sandboxes: dict[str, SandboxBase] = {}
         self._bg_handles: dict[str, str] = {}  # service → bg handle
         self._volume_dir: Optional[Path] = None
         # network name → SharedNetwork instance
@@ -521,7 +521,7 @@ class ComposeProject:
     # -- public API ---------------------------------------------------- #
 
     @property
-    def services(self) -> dict[str, Sandbox]:
+    def services(self) -> dict[str, SandboxBase]:
         """Map of service name → running :class:`Sandbox`."""
         return dict(self._sandboxes)
 
@@ -741,11 +741,13 @@ class ComposeProject:
                 result.append(f"{source}:{rest}")
             elif source in self._named_volumes:
                 # Named volume → host directory
+                assert self._volume_dir is not None
                 vol_path = self._volume_dir / source
                 vol_path.mkdir(parents=True, exist_ok=True)
                 result.append(f"{str(vol_path)}:{rest}")
             else:
                 # Assume named volume not declared (treat same way)
+                assert self._volume_dir is not None
                 vol_path = self._volume_dir / source
                 vol_path.mkdir(parents=True, exist_ok=True)
                 result.append(f"{str(vol_path)}:{rest}")
@@ -756,7 +758,7 @@ class ComposeProject:
         self,
         svc: _Service,
         hosts: dict[str, str],
-    ) -> Sandbox:
+    ) -> SandboxBase:
         """Create a Sandbox for a single compose service."""
         image = self._resolve_image(svc)
 
@@ -849,7 +851,7 @@ class ComposeProject:
         return sb
 
     @staticmethod
-    def _write_hosts(sb: Sandbox, hosts: dict[str, str]) -> None:
+    def _write_hosts(sb: SandboxBase, hosts: dict[str, str]) -> None:
         """Write /etc/hosts entries for service name resolution."""
         hosts_lines = "\n".join(f"{ip}\t{name}" for name, ip in hosts.items())
         try:
