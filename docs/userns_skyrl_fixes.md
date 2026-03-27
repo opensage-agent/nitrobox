@@ -52,7 +52,7 @@ Now `setuid(42)` maps to host uid 200042 — a valid mapping. `apt-get`, `userad
 
 ### Implementation
 
-1. **Detection** (`_detect_subuid_range` in `rootful.py`):
+1. **Detection** (`_detect_subuid_range` in `sandbox.py`):
    - Checks if `newuidmap`/`newgidmap` are installed
    - Parses `/etc/subuid` for the current user's subordinate range
    - Returns `(outer_uid, sub_start, sub_count)` or `None` (graceful fallback)
@@ -68,7 +68,7 @@ Now `setuid(42)` maps to host uid 200042 — a valid mapping. `apt-get`, `userad
 
 **Files changed:**
 - `_shell.py`: Added `subuid_range` parameter, pipe-based sync between parent and child, `newuidmap`/`newgidmap` calls after namespace creation
-- `rootful.py`: Added `_detect_subuid_range()` that auto-detects `/etc/subuid` config; graceful fallback to `--map-root-user` if unavailable
+- `sandbox.py`: Added `_detect_subuid_range()` that auto-detects `/etc/subuid` config; graceful fallback to `--map-root-user` if unavailable
 
 ### Host Setup (One-Time)
 
@@ -143,7 +143,7 @@ if [ ! -s ${merged}/etc/resolv.conf ] && [ -s /etc/resolv.conf ]; then
 fi
 ```
 
-**File changed:** `rootful.py` (`_generate_userns_setup_script`)
+**File changed:** `sandbox.py` (`_generate_userns_setup_script`)
 
 ## Fix 3: `/tmp` Permissions
 
@@ -156,29 +156,29 @@ fi
 chmod 1777 ${merged}/tmp 2>/dev/null || true
 ```
 
-**File changed:** `rootful.py` (`_generate_userns_setup_script`)
+**File changed:** `sandbox.py` (`_generate_userns_setup_script`)
 
-## Fix 4: Skip `adl-seccomp` in Userns Mode
+## Fix 4: Skip Rust init chain `/dev` setup in Userns Mode
 
 **Problem:** `apt-get update` reports `gpgv not installed` even though `/usr/bin/gpgv` exists and works. tmux fails with `create window failed: fork failed: No such file or directory`.
 
-**Root cause:** The `adl-seccomp` static binary (security helper) re-mounts `/dev` as an empty tmpfs, then creates device nodes via `mknod`. In userns mode, `mknod` silently fails (requires real root). This leaves `/dev/null`, `/dev/zero`, etc. missing. Consequences:
+**Root cause:** The Rust init chain (security primitives, formerly `adl-seccomp`) re-mounts `/dev` as an empty tmpfs, then creates device nodes via `mknod`. In userns mode, `mknod` silently fails (requires real root). This leaves `/dev/null`, `/dev/zero`, etc. missing. Consequences:
 - `apt-key`: `cannot create /dev/null: Permission denied` → gpgv verification fails
 - `tmux`: no `/dev/pts` (devpts not mounted) → PTY allocation fails
 
-The setup script had already correctly set up `/dev` (bind-mounting from host) and `/dev/pts`, but `adl-seccomp` overwrote everything.
+The setup script had already correctly set up `/dev` (bind-mounting from host) and `/dev/pts`, but the Rust init chain overwrote everything.
 
-**Fix (original):** Skip `adl-seccomp` in userns mode. The setup script already handles `/proc`, `/dev`, and volume mounts.
+**Fix (original):** Skip the Rust init chain in userns mode. The setup script already handles `/proc`, `/dev`, and volume mounts.
 
-**Fix (current):** adl-seccomp now supports a `/tmp/.adl_skip_dev` marker file. When present, it skips `/proc`+`/dev` mount (setup script handles these) but keeps capability drop, path masking, read-only paths, and seccomp BPF. This gives rootless mode full security hardening.
+**Fix (current):** The Rust init chain now supports a `/tmp/.adl_skip_dev` marker file. When present, it skips `/proc`+`/dev` mount (setup script handles these) but keeps capability drop, path masking, read-only paths, and seccomp BPF. This gives rootless mode full security hardening.
 
-Additionally, mount `devpts` in the setup script (previously only done by `adl-seccomp`):
+Additionally, mount `devpts` in the setup script (previously only done by the Rust init chain):
 ```bash
 mount -t devpts devpts ${merged}/dev/pts -o nosuid,newinstance,ptmxmode=0666
 ln -sf pts/ptmx ${merged}/dev/ptmx
 ```
 
-**File changed:** `rootful.py` (`_generate_userns_setup_script`)
+**File changed:** `sandbox.py` (`_generate_userns_setup_script`)
 
 **DONE:** seccomp BPF, capability drop, masked paths, and read-only paths are now all active in rootless mode via the `adl_skip_dev` mechanism.
 
@@ -199,7 +199,7 @@ ln -sf pts/ptmx ${merged}/dev/ptmx
 | File | Changes |
 |---|---|
 | `src/agentdocker_lite/_shell.py` | `subuid_range` param, pipe sync, `newuidmap`/`newgidmap` |
-| `src/agentdocker_lite/backends/rootful.py` | `_detect_subuid_range()`, DNS propagation, `/tmp` chmod, devpts mount, skip `adl-seccomp` in userns |
+| `src/agentdocker_lite/sandbox.py` | `_detect_subuid_range()`, DNS propagation, `/tmp` chmod, devpts mount, skip Rust init chain `/dev` setup in userns |
 
 ### SkyRL
 
