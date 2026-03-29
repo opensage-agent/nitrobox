@@ -523,7 +523,13 @@ class ComposeProject:
         svc: _Service,
         default_timeout: int,
     ) -> None:
-        """Wait for a service's health check to pass."""
+        """Wait for a service's health check to pass.
+
+        Uses ``default_timeout`` as the overall deadline.  The loop
+        continues until the deadline expires — matching Docker Engine
+        behaviour where a container keeps retrying its health check
+        beyond the initial ``retries`` count.
+        """
         hc = svc.healthcheck
         if not hc:
             return
@@ -538,7 +544,6 @@ class ComposeProject:
 
         interval = _parse_duration(hc.get("interval", "10s"))
         hc_timeout = _parse_duration(hc.get("timeout", "5s"))
-        retries = int(hc.get("retries", 3))
         start_period = _parse_duration(hc.get("start_period", "0s"))
 
         sb = self._sandboxes[name]
@@ -546,20 +551,25 @@ class ComposeProject:
         if start_period > 0:
             time.sleep(start_period)
 
-        for attempt in range(retries):
+        deadline = time.monotonic() + default_timeout
+        attempt = 0
+        while time.monotonic() < deadline:
+            attempt += 1
             try:
                 _, ec = sb.run(cmd, timeout=int(hc_timeout) or 5)
                 if ec == 0:
-                    logger.debug("Health check passed for %s", name)
+                    logger.debug("Health check passed for %s (attempt %d)", name, attempt)
                     return
             except Exception:
                 pass
-            if attempt < retries - 1:
+            if time.monotonic() + interval < deadline:
                 time.sleep(interval)
+            else:
+                break
 
         raise RuntimeError(
             f"Health check failed for service {name!r} "
-            f"after {retries} retries"
+            f"after {attempt} attempts ({default_timeout}s timeout)"
         )
 
     # -- context manager ----------------------------------------------- #
