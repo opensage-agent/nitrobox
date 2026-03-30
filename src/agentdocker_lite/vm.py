@@ -313,7 +313,11 @@ class QemuVM:
         )
 
     def _install_qmp_helper(self) -> None:
-        """Copy the adl-qmp static binary into the sandbox."""
+        """Copy the adl-qmp static binary into the sandbox.
+
+        Only needed when the Rust QMP binding is unavailable or the
+        QMP socket is not host-accessible (e.g. on overlayfs).
+        """
         vendor_dir = Path(__file__).parent / "_vendor"
         helper_src = vendor_dir / "adl-qmp"
         if not helper_src.exists():
@@ -329,16 +333,28 @@ class QemuVM:
     def _qmp_exec(
         self, command: str, arguments: dict | None = None
     ) -> dict:
-        """Send a QMP command via the adl-qmp static binary.
+        """Send a QMP command.
 
-        Each call opens a new QMP connection, negotiates capabilities,
-        sends the command, reads the response, and disconnects.
+        Tries the Rust native QMP client first (host-side, no subprocess
+        overhead).  Falls back to the adl-qmp static binary inside the
+        sandbox if the host-side socket is not reachable.
         """
         msg: dict[str, Any] = {"execute": command}
         if arguments:
             msg["arguments"] = arguments
         msg_json = json.dumps(msg)
 
+        # Try Rust binding (host-side, direct socket access)
+        try:
+            host_sock = self._sb._host_path(self._qmp_path)
+            if host_sock.exists():
+                from agentdocker_lite._core import py_qmp_send
+                output = py_qmp_send(str(host_sock), msg_json, 30)
+                return json.loads(output)
+        except (OSError, ImportError):
+            pass  # fall through to sandbox-side helper
+
+        # Fallback: adl-qmp binary inside sandbox
         output, ec = self._sb.run(
             f"{_QMP_HELPER} "
             f"{shlex.quote(self._qmp_path)} "

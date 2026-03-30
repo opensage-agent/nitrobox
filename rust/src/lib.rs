@@ -7,6 +7,7 @@ pub mod cgroup;
 pub mod init;
 pub mod mount;
 pub mod pidfd;
+pub mod qmp;
 pub mod security;
 
 use pyo3::prelude::*;
@@ -325,6 +326,25 @@ fn py_spawn_sandbox(config: &Bound<'_, PyDict>) -> PyResult<PySpawnResult> {
 }
 
 // ======================================================================
+// QMP
+// ======================================================================
+
+/// Send a QMP command to a QEMU monitor Unix socket.
+///
+/// Connects, negotiates capabilities, sends *command_json*, and returns
+/// the JSON response string (containing ``"return"`` or ``"error"``).
+///
+/// The socket must be accessible from the calling process (i.e. on a
+/// bind-mounted volume path, not inside an overlayfs mount namespace).
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (socket_path, command_json, timeout_secs=30))]
+fn py_qmp_send(socket_path: &str, command_json: &str, timeout_secs: u64) -> PyResult<String> {
+    qmp::qmp_send(socket_path, command_json, timeout_secs)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+// ======================================================================
 // Module definition
 // ======================================================================
 
@@ -361,6 +381,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // spawn
     m.add_function(wrap_pyfunction!(py_spawn_sandbox, m)?)?;
+
+    // qmp
+    m.add_function(wrap_pyfunction!(py_qmp_send, m)?)?;
 
     Ok(())
 }
