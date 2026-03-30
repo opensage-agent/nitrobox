@@ -291,11 +291,11 @@ class QemuVM:
         (only the ``-qmp`` socket arg is appended).  Otherwise build a
         standard command from the disk/memory/cpus/display parameters.
         """
-        qmp_arg = f"-qmp unix:{self._qmp_path},server,nowait"
+        qmp_spec = f"unix:{self._qmp_path},server,nowait"
 
         if self._cmd_override:
             # Caller provides full command; we only append QMP socket.
-            return f"{self._cmd_override} {qmp_arg}"
+            return f"{self._cmd_override} -qmp {qmp_spec}"
 
         args = [
             "qemu-system-x86_64",
@@ -303,7 +303,7 @@ class QemuVM:
             "-m", self._memory,
             "-smp", str(self._cpus),
             "-drive", f"file={self._disk},format=qcow2,if=virtio",
-            qmp_arg,
+            "-qmp", qmp_spec,
             "-display", self._display,
             "-no-shutdown",
         ]

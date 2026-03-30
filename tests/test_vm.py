@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -186,6 +187,27 @@ class TestQemuVM:
         assert "/vm/disk.qcow2" in cmd
         assert "-vnc :0" in cmd
 
+    def test_build_cmd_override(self, vm_sandbox):
+        """cmd_override replaces the default QEMU command."""
+        sb, _ = vm_sandbox
+        override = "qemu-system-x86_64 -enable-kvm -m 8G -drive file=/my/disk.qcow2"
+        vm = QemuVM(sb, cmd_override=override)
+        cmd = vm._build_cmd()
+        # cmd_override used verbatim with -qmp appended
+        assert cmd.startswith(override)
+        assert "-qmp unix:" in cmd
+        # Default args should NOT be present
+        assert "-smp" not in cmd
+        assert "-display" not in cmd
+
+    def test_build_cmd_override_preserves_qmp_socket(self, vm_sandbox):
+        """cmd_override + custom qmp_socket works."""
+        sb, _ = vm_sandbox
+        override = "qemu-system-x86_64 -m 4G"
+        vm = QemuVM(sb, cmd_override=override, qmp_socket="/storage/.qmp.sock")
+        cmd = vm._build_cmd()
+        assert cmd.endswith("-qmp unix:/storage/.qmp.sock,server,nowait")
+
     def test_repr(self, vm_sandbox):
         """repr shows useful info."""
         sb, _ = vm_sandbox
@@ -193,3 +215,54 @@ class TestQemuVM:
         r = repr(vm)
         assert "disk=" in r
         assert "stopped" in r
+
+
+class TestRustQMP:
+    """Tests for the Rust QMP client binding."""
+
+    def test_binding_importable(self):
+        """py_qmp_send is importable from _core."""
+        from agentdocker_lite._core import py_qmp_send
+        assert callable(py_qmp_send)
+
+    def test_nonexistent_socket_raises(self):
+        """Connecting to a non-existent socket raises OSError."""
+        from agentdocker_lite._core import py_qmp_send
+        with pytest.raises(OSError):
+            py_qmp_send("/tmp/nonexistent_qmp_socket_12345.sock", '{"execute":"query-status"}')
+
+    def test_invalid_socket_path_raises(self):
+        """Empty socket path raises OSError."""
+        from agentdocker_lite._core import py_qmp_send
+        with pytest.raises(OSError):
+            py_qmp_send("", '{"execute":"query-status"}')
+
+    def test_qmp_via_rust_binding_on_volume(self, vm_sandbox, tmp_path):
+        """Rust QMP binding works when QMP socket is on a volume mount."""
+        sb, vm_dir = vm_sandbox
+
+        # Place QMP socket on a host-accessible volume path.
+        # Sockets on overlayfs are not connectable from the host side.
+        qmp_dir = tmp_path / "qmp"
+        qmp_dir.mkdir()
+        # The volume was already set up when vm_sandbox was created,
+        # but /vm is already a volume mount, so use that path.
+        qmp_path = "/vm/.adl_qmp_test.sock"
+
+        vm = QemuVM(sb, disk="/vm/test.qcow2", memory="128M", cpus=1,
+                    qmp_socket=qmp_path)
+        vm.start(timeout=30)
+        try:
+            import json
+            from agentdocker_lite._core import py_qmp_send
+            # /vm is bind-mounted to vm_dir on host
+            host_sock = Path(vm_dir) / ".adl_qmp_test.sock"
+            if not host_sock.exists():
+                pytest.skip("QMP socket not found on host volume")
+            msg = json.dumps({"execute": "query-status"})
+            result = py_qmp_send(str(host_sock), msg, 10)
+            parsed = json.loads(result)
+            assert "return" in parsed
+            assert parsed["return"]["status"] == "running"
+        finally:
+            vm.stop()

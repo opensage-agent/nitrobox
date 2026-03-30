@@ -2081,3 +2081,110 @@ class TestAsyncAPI:
 
         asyncio.run(main())
 
+
+class TestVmMode:
+    """Tests for vm_mode=True sandbox init."""
+
+    def test_sys_mounted(self, tmp_path, shared_cache_dir):
+        """vm_mode sandbox has /sys mounted with contents."""
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            vm_mode=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="vm-sys")
+        try:
+            out, ec = sb.run("ls /sys/kernel 2>&1")
+            assert ec == 0
+            assert out.strip(), "/sys/kernel should have contents"
+        finally:
+            sb.delete()
+
+    def test_tmp_is_tmpfs(self, tmp_path, shared_cache_dir):
+        """vm_mode mounts tmpfs at /tmp."""
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            vm_mode=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="vm-tmp")
+        try:
+            out, ec = sb.run("stat -f -c %T /tmp 2>/dev/null || stat -f /tmp 2>/dev/null")
+            assert ec == 0
+            assert "tmpfs" in out.lower(), f"/tmp should be tmpfs, got: {out}"
+        finally:
+            sb.delete()
+
+    def test_run_is_tmpfs(self, tmp_path, shared_cache_dir):
+        """vm_mode mounts tmpfs at /run."""
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            vm_mode=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="vm-run")
+        try:
+            out, ec = sb.run("stat -f -c %T /run 2>/dev/null || stat -f /run 2>/dev/null")
+            assert ec == 0
+            assert "tmpfs" in out.lower(), f"/run should be tmpfs, got: {out}"
+        finally:
+            sb.delete()
+
+    def test_mktemp_works(self, tmp_path, shared_cache_dir):
+        """vm_mode sandbox can create temp files (no overlayfs inode overflow)."""
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            vm_mode=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="vm-mktemp")
+        try:
+            out, ec = sb.run("mktemp")
+            assert ec == 0
+            assert "/tmp/" in out
+        finally:
+            sb.delete()
+
+    def test_volumes_on_top_of_tmpfs(self, tmp_path, shared_cache_dir):
+        """Directory volume bind-mounts work on top of tmpfs /run."""
+        host_dir = tmp_path / "scripts"
+        host_dir.mkdir()
+        (host_dir / "test.sh").write_text("#!/bin/sh\necho hello\n")
+
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            vm_mode=True,
+            volumes=[f"{host_dir}:/run/scripts:ro"],
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="vm-vol-run")
+        try:
+            out, ec = sb.run("cat /run/scripts/test.sh")
+            assert ec == 0
+            assert "echo hello" in out
+        finally:
+            sb.delete()
+
+    def test_proc_sys_not_readonly(self, tmp_path, shared_cache_dir):
+        """vm_mode does not make /proc/sys read-only."""
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            vm_mode=True,
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        sb = Sandbox(config, name="vm-procsys")
+        try:
+            # In vm_mode, /proc/sys should NOT have a read-only bind mount
+            out, ec = sb.run("mount 2>/dev/null | grep 'proc/sys.*\\bro\\b' | wc -l")
+            assert ec == 0
+            count = int(out.strip())
+            assert count == 0, f"/proc/sys should not be read-only in vm_mode, found {count} ro mounts"
+        finally:
+            sb.delete()
+
