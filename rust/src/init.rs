@@ -169,9 +169,12 @@ fn mount_overlay_fs(config: &SandboxSpawnConfig) -> io::Result<()> {
         }
 
         if config.userns {
-            // User namespace: must add userxattr option
+            // User namespace: must add userxattr option.
+            // xino=on: generate unique inode numbers across layers to prevent
+            // EOVERFLOW (Value too large for defined data type) when creating
+            // temp files on overlayfs.  This is the Docker default.
             let opts = format!(
-                "lowerdir={},upperdir={},workdir={},userxattr",
+                "lowerdir={},upperdir={},workdir={},userxattr,xino=on",
                 lowerdir, upper, work
             );
             mnt(
@@ -195,12 +198,29 @@ fn mount_proc(rootfs: &str, net_isolate: bool) {
         init_warn_tl(&format!("mount /proc failed: {}", e));
     }
 
+    // Mount /sys: fresh sysfs when we own the netns, bind-mount otherwise.
+    // Docker always provides /sys; QEMU/KVM and system tools rely on it.
+    let sys_path = format!("{}/sys", rootfs);
+    let _ = std::fs::create_dir_all(&sys_path);
     if net_isolate {
-        let sys_path = format!("{}/sys", rootfs);
-        let _ = std::fs::create_dir_all(&sys_path);
         if let Err(e) = mnt(Some("sysfs"), &sys_path, Some("sysfs"), MsFlags::empty(), None)
         {
-            log::debug!("mount /sys failed: {}", e);
+            log::debug!("mount fresh sysfs failed: {}", e);
+        }
+    } else {
+        // Shared netns: can't mount fresh sysfs, bind-mount host's /sys read-only.
+        if let Err(e) = mnt(
+            Some("/sys"), &sys_path, None::<&str>,
+            MsFlags::MS_BIND | MsFlags::MS_REC, None,
+        ) {
+            log::debug!("bind-mount /sys failed: {}", e);
+        } else {
+            // Remount read-only
+            let _ = mnt(
+                None::<&str>, &sys_path, None::<&str>,
+                MsFlags::MS_BIND | MsFlags::MS_REC | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY,
+                None,
+            );
         }
     }
 }
