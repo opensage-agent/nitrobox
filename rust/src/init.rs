@@ -1079,6 +1079,19 @@ fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
         fix_tmp_perms(&config.rootfs);
         mount_volumes(config);
         mount_tmpfs(config);
+        // Always mount tmpfs at /tmp to avoid overlayfs inode overflow
+        // (EOVERFLOW / "Value too large for defined data type") when creating
+        // temp files.  Only if /tmp is not already a user-requested tmpfs mount.
+        if !config.tmpfs_mounts.iter().any(|s| s.starts_with("/tmp")) {
+            let tmp_target = format!("{}/tmp", config.rootfs);
+            let _ = std::fs::create_dir_all(&tmp_target);
+            if let Err(e) = mnt(
+                Some("tmpfs"), &tmp_target, Some("tmpfs"),
+                MsFlags::empty(), Some("mode=1777"),
+            ) {
+                log::debug!("default tmpfs /tmp mount failed: {}", e);
+            }
+        }
 
         if !config.port_map.is_empty() {
             if let (Some(pb), Some(ed)) = (&config.pasta_bin, &config.env_dir) {
