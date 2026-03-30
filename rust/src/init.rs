@@ -54,6 +54,9 @@ pub struct SandboxSpawnConfig {
     pub pasta_bin: Option<String>,
     pub ipv6: bool,
     pub env_dir: Option<String>,
+    /// VM mode: relaxed init for QEMU/KVM workloads.
+    /// Mounts /sys, tmpfs /tmp+/run, skips masking, disables seccomp.
+    pub vm_mode: bool,
 }
 
 pub struct SpawnResult {
@@ -188,19 +191,43 @@ fn mount_overlay_fs(config: &SandboxSpawnConfig) -> io::Result<()> {
     Ok(())
 }
 
-fn mount_proc(rootfs: &str, net_isolate: bool) {
+fn mount_proc(rootfs: &str, net_isolate: bool, vm_mode: bool) {
     let proc_path = format!("{}/proc", rootfs);
     let _ = std::fs::create_dir_all(&proc_path);
     if let Err(e) = mnt(Some("proc"), &proc_path, Some("proc"), MsFlags::empty(), None) {
         init_warn_tl(&format!("mount /proc failed: {}", e));
     }
 
-    if net_isolate {
+    // Mount /sys: fresh sysfs when we own the netns, bind-mount otherwise.
+    if net_isolate || vm_mode {
         let sys_path = format!("{}/sys", rootfs);
         let _ = std::fs::create_dir_all(&sys_path);
-        if let Err(e) = mnt(Some("sysfs"), &sys_path, Some("sysfs"), MsFlags::empty(), None)
-        {
-            log::debug!("mount /sys failed: {}", e);
+        if net_isolate {
+            if let Err(e) = mnt(Some("sysfs"), &sys_path, Some("sysfs"), MsFlags::empty(), None) {
+                log::debug!("mount fresh sysfs failed: {}", e);
+            }
+        } else {
+            // vm_mode without net_isolate: bind-mount host's /sys read-only
+            if let Err(e) = mnt(
+                Some("/sys"), &sys_path, None::<&str>,
+                MsFlags::MS_BIND | MsFlags::MS_REC, None,
+            ) {
+                log::debug!("bind-mount /sys failed: {}", e);
+            }
+        }
+    }
+
+    // vm_mode: mount tmpfs at /tmp and /run to avoid overlayfs inode issues
+    if vm_mode {
+        for (path, opts) in &[("/tmp", "mode=1777"), ("/run", "mode=0755")] {
+            let target = format!("{}{}", rootfs, path);
+            let _ = std::fs::create_dir_all(&target);
+            if let Err(e) = mnt(
+                Some("tmpfs"), &target, Some("tmpfs"),
+                MsFlags::empty(), Some(opts),
+            ) {
+                log::debug!("vm_mode tmpfs {} failed: {}", path, e);
+            }
         }
     }
 }
@@ -420,24 +447,28 @@ fn apply_security(config: &SandboxSpawnConfig) {
         Err(e) => init_warn_tl(&format!("cap_drop failed: {}", e)),
     }
 
-    // Mask paths
-    for path in MASKED_PATHS {
-        if !Path::new(path).exists() { continue; }
-        let result = if Path::new(path).is_dir() {
-            mnt(Some("tmpfs"), path, Some("tmpfs"), MsFlags::empty(), None)
-        } else {
-            mnt(Some("/dev/null"), path, None::<&str>, MsFlags::MS_BIND, None)
-        };
-        if let Err(e) = result {
-            init_warn_tl(&format!("mask_path {} failed: {}", path, e));
+    // vm_mode: skip path masking and read-only enforcement.
+    // QEMU needs writable /proc/sys and readable /sys/firmware.
+    if !config.vm_mode {
+        // Mask paths
+        for path in MASKED_PATHS {
+            if !Path::new(path).exists() { continue; }
+            let result = if Path::new(path).is_dir() {
+                mnt(Some("tmpfs"), path, Some("tmpfs"), MsFlags::empty(), None)
+            } else {
+                mnt(Some("/dev/null"), path, None::<&str>, MsFlags::MS_BIND, None)
+            };
+            if let Err(e) = result {
+                init_warn_tl(&format!("mask_path {} failed: {}", path, e));
+            }
         }
-    }
 
-    // Read-only paths
-    for path in RO_PATHS {
-        if mnt(Some(path), path, None::<&str>, MsFlags::MS_BIND, None).is_ok() {
-            if let Err(e) = mnt(None::<&str>, path, None::<&str>, MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY, None) {
-                init_warn_tl(&format!("readonly_path {} remount failed: {}", path, e));
+        // Read-only paths
+        for path in RO_PATHS {
+            if mnt(Some(path), path, None::<&str>, MsFlags::MS_BIND, None).is_ok() {
+                if let Err(e) = mnt(None::<&str>, path, None::<&str>, MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_RDONLY, None) {
+                    init_warn_tl(&format!("readonly_path {} remount failed: {}", path, e));
+                }
             }
         }
     }
@@ -466,7 +497,8 @@ fn apply_security(config: &SandboxSpawnConfig) {
         }
     }
 
-    if config.seccomp {
+    // vm_mode forces seccomp off (QEMU uses KVM ioctls extensively)
+    if config.seccomp && !config.vm_mode {
         if let Err(e) = security::apply_seccomp_filter() {
             init_warn_tl(&format!("seccomp failed: {}", e));
         }
@@ -1022,7 +1054,7 @@ fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
         if let Err(e) = do_pivot_root_phase1(&config.rootfs) {
             init_fatal(err_w, &format!("pivot_root failed: {}", e));
         }
-        mount_proc("/", config.net_isolate);
+        mount_proc("/", config.net_isolate, config.vm_mode);
         setup_dev_rootful("/");
         mount_shm("/", config.shm_size);
         // Mount host devices from /.pivot_old BEFORE we detach it.
@@ -1051,7 +1083,7 @@ fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
         }
         precreate_volume_mountpoints(config);
         if config.read_only { make_rootfs_readonly(&config.rootfs); }
-        mount_proc(&config.rootfs, config.net_isolate);
+        mount_proc(&config.rootfs, config.net_isolate, config.vm_mode);
         setup_dev_rootless(&config.rootfs);
         mount_shm(&config.rootfs, config.shm_size);
         mount_devices(&config.rootfs, &config.devices);

@@ -304,6 +304,9 @@ class SandboxConfig:
     # OCI ENTRYPOINT — runs before the shell, typically does initialization
     # then `exec "$@"` to hand off to the shell.  Auto-filled from image
     # config if not set explicitly.
+    vm_mode: bool = False
+    # VM mode: relaxed init for QEMU/KVM workloads.  Mounts /sys,
+    # tmpfs at /tmp+/run, skips path masking, and disables seccomp.
 
     def __post_init__(self) -> None:
         if not self.env_base_dir:

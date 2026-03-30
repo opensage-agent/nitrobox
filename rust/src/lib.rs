@@ -308,6 +308,7 @@ fn py_spawn_sandbox(config: &Bound<'_, PyDict>) -> PyResult<PySpawnResult> {
         pasta_bin: get_opt_str(config, "pasta_bin")?,
         ipv6: get_bool(config, "ipv6", false)?,
         env_dir: get_opt_str(config, "env_dir")?,
+        vm_mode: get_bool(config, "vm_mode", false)?,
     };
 
     let r = init::spawn_sandbox(&cfg)

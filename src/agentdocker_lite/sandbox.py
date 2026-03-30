@@ -922,6 +922,7 @@ class Sandbox:
             "pasta_bin": self._find_pasta_bin() if config.port_map else None,
             "ipv6": config.ipv6,
             "env_dir": str(self._env_dir),
+            "vm_mode": config.vm_mode,
         }
         cfg.update(overrides)
         return cfg
