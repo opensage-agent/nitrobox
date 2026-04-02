@@ -1899,6 +1899,15 @@ class TestDeleteCleansBackground:
 # ------------------------------------------------------------------ #
 
 
+def _has_registry_access() -> bool:
+    """Check if Docker Hub API is reachable and not rate-limited."""
+    try:
+        from nitrobox._registry import get_diff_ids_from_registry
+        return get_diff_ids_from_registry("alpine:3.19") is not None
+    except Exception:
+        return False
+
+
 class TestRegistry:
     def test_parse_image_ref(self):
         """parse_image_ref correctly splits registry/repo/tag."""
@@ -1913,6 +1922,7 @@ class TestRegistry:
         assert parse_image_ref("ghcr.io/org/repo:v1") == (
             "ghcr.io", "org/repo", "v1")
 
+    @pytest.mark.skipif(not _has_registry_access(), reason="no network/registry access")
     def test_get_diff_ids_from_registry(self):
         """Can get layer diff_ids directly from Docker Hub."""
         from nitrobox._registry import get_diff_ids_from_registry
@@ -1922,6 +1932,7 @@ class TestRegistry:
         assert len(ids) >= 1
         assert all(d.startswith("sha256:") for d in ids)
 
+    @pytest.mark.skipif(not _has_registry_access(), reason="no network/registry access")
     def test_get_config_from_registry(self):
         """Can get image config directly from Docker Hub."""
         from nitrobox._registry import get_config_from_registry
@@ -1930,6 +1941,7 @@ class TestRegistry:
         assert cfg is not None
         assert cfg["cmd"] == ["python3"]
 
+    @pytest.mark.skipif(not _has_registry_access(), reason="no network/registry access")
     def test_registry_fallback_layers(self, tmp_path):
         """Layer extraction works via registry when Docker/Podman unavailable."""
         import nitrobox.rootfs as rf

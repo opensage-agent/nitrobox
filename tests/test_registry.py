@@ -334,11 +334,11 @@ class TestPullImageLayers:
 
 
 def _has_network() -> bool:
-    import socket
+    """Check Docker Hub API is reachable and not rate-limited."""
     try:
-        socket.create_connection(("registry-1.docker.io", 443), timeout=3)
-        return True
-    except OSError:
+        from nitrobox._registry import get_diff_ids_from_registry
+        return get_diff_ids_from_registry("alpine:3.19") is not None
+    except Exception:
         return False
 
 
