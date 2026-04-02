@@ -1675,22 +1675,34 @@ class Sandbox:
     # ================================================================== #
 
     def _fixup_userns_permissions(self) -> None:
-        """Make all files world-accessible before deleting userns sandbox.
+        """Make mapped-uid files deletable before destroying userns sandbox.
 
         In userns mode, non-root users inside the sandbox (e.g. _apt,
         www-data) create files with mapped UIDs that the host user can't
-        delete.  Running ``chmod -R 777`` inside the sandbox (where we're
-        root) fixes permissions in the overlayfs upper layer so
-        ``shutil.rmtree`` from the host can clean up everything.
+        delete.  We chmod only the overlayfs upper dir (not the entire
+        rootfs) to keep this fast.
         """
         if not self._userns:
+            return
+        upper = getattr(self, "_upper_dir", None)
+        if not upper:
             return
         shell = self._persistent_shell
         if not shell.alive:
             return
+        # The upper dir is at a host path; inside the sandbox it's not
+        # directly visible. Use the host-relative path via /proc/self
+        # trick: the sandbox shell can access its own rootfs overlay.
+        # Simpler: just chmod the host path from inside the userns via
+        # nsenter, since we need the userns uid mapping to own the files.
+        pid = shell.pid
         try:
-            shell.execute("chmod -R 777 / 2>/dev/null; true", timeout=30)
-        except (OSError, RuntimeError):
+            subprocess.run(
+                ["nsenter", f"--user=/proc/{pid}/ns/user", "--",
+                 "chmod", "-R", "a+rwX", str(upper)],
+                capture_output=True, timeout=30,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
             pass
 
     def _fixup_userns_ownership(self) -> None:
