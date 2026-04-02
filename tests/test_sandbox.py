@@ -1900,13 +1900,14 @@ class TestDeleteCleansBackground:
 # ------------------------------------------------------------------ #
 
 
-def _has_registry_access() -> bool:
-    """Check if Docker Hub API is reachable and not rate-limited."""
+def _skip_if_no_registry():
+    """Skip test at runtime if Docker Hub API is unreachable or rate-limited."""
     from nitrobox._registry import get_diff_ids_from_registry
     try:
-        return get_diff_ids_from_registry("alpine:3.19") is not None
+        if get_diff_ids_from_registry("alpine:3.19") is None:
+            pytest.skip("Docker Hub unreachable or rate-limited")
     except (OSError, urllib.error.URLError, RuntimeError):
-        return False
+        pytest.skip("Docker Hub unreachable or rate-limited")
 
 
 class TestRegistry:
@@ -1923,9 +1924,9 @@ class TestRegistry:
         assert parse_image_ref("ghcr.io/org/repo:v1") == (
             "ghcr.io", "org/repo", "v1")
 
-    @pytest.mark.skipif(not _has_registry_access(), reason="no network/registry access")
     def test_get_diff_ids_from_registry(self):
         """Can get layer diff_ids directly from Docker Hub."""
+        _skip_if_no_registry()
         from nitrobox._registry import get_diff_ids_from_registry
 
         ids = get_diff_ids_from_registry("ubuntu:22.04")
@@ -1933,18 +1934,18 @@ class TestRegistry:
         assert len(ids) >= 1
         assert all(d.startswith("sha256:") for d in ids)
 
-    @pytest.mark.skipif(not _has_registry_access(), reason="no network/registry access")
     def test_get_config_from_registry(self):
         """Can get image config directly from Docker Hub."""
+        _skip_if_no_registry()
         from nitrobox._registry import get_config_from_registry
 
         cfg = get_config_from_registry("python:3.11-slim")
         assert cfg is not None
         assert cfg["cmd"] == ["python3"]
 
-    @pytest.mark.skipif(not _has_registry_access(), reason="no network/registry access")
     def test_registry_fallback_layers(self, tmp_path):
         """Layer extraction works via registry when Docker/Podman unavailable."""
+        _skip_if_no_registry()
         import nitrobox.rootfs as rf
 
         orig = rf._container_cli

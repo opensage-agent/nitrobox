@@ -566,6 +566,7 @@ class Sandbox:
             except Exception:
                 pass
 
+        self._fixup_userns_permissions()
         self._fixup_userns_ownership()
         self._persistent_shell.kill()
 
@@ -1672,6 +1673,25 @@ class Sandbox:
     # ================================================================== #
     #  Reset / cleanup helpers                                             #
     # ================================================================== #
+
+    def _fixup_userns_permissions(self) -> None:
+        """Make all files world-accessible before deleting userns sandbox.
+
+        In userns mode, non-root users inside the sandbox (e.g. _apt,
+        www-data) create files with mapped UIDs that the host user can't
+        delete.  Running ``chmod -R 777`` inside the sandbox (where we're
+        root) fixes permissions in the overlayfs upper layer so
+        ``shutil.rmtree`` from the host can clean up everything.
+        """
+        if not self._userns:
+            return
+        shell = self._persistent_shell
+        if not shell.alive:
+            return
+        try:
+            shell.execute("chmod -R 777 / 2>/dev/null; true", timeout=30)
+        except (OSError, RuntimeError):
+            pass
 
     def _fixup_userns_ownership(self) -> None:
         """Fix ownership of files created by mapped uids before killing shell."""

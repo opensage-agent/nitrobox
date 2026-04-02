@@ -333,22 +333,23 @@ class TestPullImageLayers:
 # ====================================================================== #
 
 
-def _has_network() -> bool:
-    """Check Docker Hub API is reachable and not rate-limited."""
+def _skip_if_no_registry():
+    """Skip test if Docker Hub API is unreachable or rate-limited."""
     import urllib.error
     from nitrobox._registry import get_diff_ids_from_registry
     try:
-        return get_diff_ids_from_registry("alpine:3.19") is not None
+        if get_diff_ids_from_registry("alpine:3.19") is None:
+            pytest.skip("Docker Hub unreachable or rate-limited")
     except (OSError, urllib.error.URLError, RuntimeError):
-        return False
+        pytest.skip("Docker Hub unreachable or rate-limited")
 
 
-@pytest.mark.skipif(not _has_network(), reason="no network access")
 class TestRegistryIntegration:
     """Real registry tests (Docker Hub)."""
 
     def test_parse_and_get_config_ubuntu(self):
         """Fetch real ubuntu image config from Docker Hub."""
+        _skip_if_no_registry()
         result = get_config_from_registry("ubuntu:22.04")
         assert result is not None
         assert result["cmd"] is not None  # ubuntu has CMD ["/bin/bash"]
@@ -356,6 +357,7 @@ class TestRegistryIntegration:
 
     def test_parse_and_get_config_python(self):
         """Fetch real python image config."""
+        _skip_if_no_registry()
         result = get_config_from_registry("python:3.11-slim")
         assert result is not None
         assert "python" in (result.get("cmd") or [""])[0].lower() or result.get("entrypoint") is not None
@@ -363,6 +365,7 @@ class TestRegistryIntegration:
 
     def test_get_diff_ids(self):
         """Fetch diff_ids for a real image."""
+        _skip_if_no_registry()
         from nitrobox._registry import get_diff_ids_from_registry
         diff_ids = get_diff_ids_from_registry("alpine:3.19")
         assert diff_ids is not None
@@ -371,6 +374,7 @@ class TestRegistryIntegration:
 
     def test_pull_layer_with_digest_verify(self):
         """Download a real layer and verify digest."""
+        _skip_if_no_registry()
         from nitrobox._registry import (
             _get_token,
             download_layer,
