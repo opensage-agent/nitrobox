@@ -1218,6 +1218,26 @@ class Sandbox:
         return layer_dirs[0], layer_dirs
 
     @staticmethod
+    def _get_image_digest(image: str) -> str | None:
+        """Get the content digest (sha256) of a Docker image.
+
+        Returns the digest string (e.g. ``sha256:abc123...``) or None
+        if the image doesn't exist or Docker is unavailable.
+        """
+        try:
+            result = subprocess.run(
+                ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                digest = result.stdout.strip()
+                # Normalize: "sha256:abc123..." → "sha256_abc123..."
+                return digest.replace(":", "_")[:80]
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+        return None
+
+    @staticmethod
     def _resolve_cached_rootfs(
         image: str,
         rootfs_cache_dir: Path,
@@ -1227,6 +1247,10 @@ class Sandbox:
         label: str = "rootfs",
     ) -> Path:
         """Resolve a flat rootfs with file-lock-based caching.
+
+        Uses the image's content digest as the cache key so that
+        images with different tags but identical content share the
+        same cached rootfs (like Docker's layer cache).
 
         Shared logic for btrfs and docker-export rootfs preparation.
         """
@@ -1238,15 +1262,26 @@ class Sandbox:
                 verify_fn(candidate)
             return candidate
 
-        safe_name = image.replace("/", "_").replace(":", "_").replace(".", "_")
-        cached_rootfs = rootfs_cache_dir / safe_name
+        # Use content digest as cache key when available, falling
+        # back to the image name.  This ensures images with different
+        # tags but identical content (e.g. different compose project
+        # names) share the same cached rootfs.
+        digest = Sandbox._get_image_digest(image)
+        cache_key = digest if digest else image.replace("/", "_").replace(":", "_").replace(".", "_")
+        cached_rootfs = rootfs_cache_dir / cache_key
+
+        # Also check under the name-based key for backward compat
+        name_key = image.replace("/", "_").replace(":", "_").replace(".", "_")
+        name_cached = rootfs_cache_dir / name_key
+        if not cached_rootfs.exists() and name_cached.exists() and name_cached.is_dir():
+            cached_rootfs = name_cached
 
         if cached_rootfs.exists() and cached_rootfs.is_dir():
             if verify_fn:
                 verify_fn(cached_rootfs)
             return cached_rootfs
 
-        lock_path = rootfs_cache_dir / f".{safe_name}.lock"
+        lock_path = rootfs_cache_dir / f".{cache_key}.lock"
         rootfs_cache_dir.mkdir(parents=True, exist_ok=True)
         with open(lock_path, "w") as lock_fd:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)

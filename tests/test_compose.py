@@ -2116,3 +2116,53 @@ class TestWriteResolv:
         sb.run = MagicMock(side_effect=RuntimeError("sandbox dead"))
         # Should not raise
         ComposeProject._write_resolv(sb, ["169.254.1.1"])
+
+
+class TestDigestCache:
+    """Unit tests for content-digest-based rootfs caching."""
+
+    def test_get_image_digest_returns_string(self):
+        """Known image returns a digest string."""
+        from nitrobox.sandbox import Sandbox
+        digest = Sandbox._get_image_digest("ubuntu:22.04")
+        if digest is not None:  # Docker may not be available in CI
+            assert digest.startswith("sha256_")
+            assert len(digest) > 20
+
+    def test_get_image_digest_missing_image(self):
+        """Non-existent image returns None."""
+        from nitrobox.sandbox import Sandbox
+        digest = Sandbox._get_image_digest("nonexistent-image:99.99")
+        assert digest is None
+
+    def test_get_image_digest_same_content(self):
+        """Two tags pointing to the same image have the same digest."""
+        import subprocess
+        from nitrobox.sandbox import Sandbox
+
+        # Tag ubuntu:22.04 with a custom name
+        result = subprocess.run(
+            ["docker", "tag", "ubuntu:22.04", "digest-test-dup:latest"],
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            pytest.skip("docker not available or ubuntu:22.04 not pulled")
+
+        try:
+            d1 = Sandbox._get_image_digest("ubuntu:22.04")
+            d2 = Sandbox._get_image_digest("digest-test-dup:latest")
+            assert d1 is not None
+            assert d1 == d2
+        finally:
+            subprocess.run(
+                ["docker", "rmi", "digest-test-dup:latest"],
+                capture_output=True,
+            )
+
+    def test_get_image_digest_different_content(self):
+        """Different images have different digests."""
+        from nitrobox.sandbox import Sandbox
+        d1 = Sandbox._get_image_digest("ubuntu:22.04")
+        d2 = Sandbox._get_image_digest("alpine:latest")
+        if d1 is not None and d2 is not None:
+            assert d1 != d2
