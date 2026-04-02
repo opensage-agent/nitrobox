@@ -13,184 +13,76 @@ Generating Trajectories: 100%|██████████| 1/1 [00:49<00:00, 
 
 ## Fix 1: Full UID Mapping (`newuidmap`/`newgidmap`)
 
-**Problem:** When nitrobox runs in rootless (user namespace) mode, `--map-root-user` only maps a single UID:
+**Problem:** When nitrobox runs in rootless (user namespace) mode with only `--map-root-user`, only UID 0 is mapped. Programs that switch to non-root users (like `apt-get` dropping to `_apt` uid 42) fail with `EINVAL`.
 
-```
-sandbox uid 0 (root)  →  host uid (e.g. 243001009 / jingyang)
-all other uids        →  unmapped (invalid)
-```
+**Fix:** Auto-detect subordinate UID ranges via `/etc/subuid` and apply full mapping with `newuidmap`/`newgidmap`.
 
-This causes programs that switch to non-root users internally to fail. The most common case is `apt-get`, which drops privileges to the `_apt` user (uid 42) for downloading packages:
+### Current Implementation
 
-```
-apt-get update
-  → internally: setuid(42) to switch to _apt
-  → kernel: uid 42 has no mapping → EINVAL
-  → "seteuid 42 failed - Invalid argument"
-```
-
-Other affected operations: `useradd`, `su`, `chown` to non-root users, any program that calls `setgroups()`.
-
-**Root cause:** `unshare --user --map-root-user` writes a single-entry uid_map:
-
-```
-# /proc/<pid>/uid_map
-0  <outer_uid>  1       ← only uid 0 is mapped
-```
-
-The kernel rejects any `setuid(N)` where N > 0 because there's no mapping entry for it.
-
-**Fix:** Use subordinate UID ranges via `newuidmap`/`newgidmap` to write a full uid mapping:
-
-```
-# /proc/<pid>/uid_map
-0  243001009      1     ← uid 0 → jingyang (host user)
-1     200000  65536     ← uid 1-65536 → host uid 200000-265535
-```
-
-Now `setuid(42)` maps to host uid 200042 — a valid mapping. `apt-get`, `useradd`, etc. all work.
-
-### Implementation
-
-1. **Detection** (`_detect_subuid_range` in `sandbox.py`):
-   - Checks if `newuidmap`/`newgidmap` are installed
+1. **Detection** (`Sandbox._detect_subuid_range()` in `sandbox.py`):
+   - Checks if `newuidmap`/`newgidmap` binaries exist
    - Parses `/etc/subuid` for the current user's subordinate range
    - Returns `(outer_uid, sub_start, sub_count)` or `None` (graceful fallback)
+   - Result is cached class-wide
 
-2. **Synchronization** (`start()` in `_shell.py`):
-   - `--map-root-user` is removed from the `unshare` command
-   - A sync pipe is created: the child blocks on `read` after entering the new namespace
-   - Parent polls `/proc/<pid>/ns/user` to confirm namespace creation
-   - Parent calls `newuidmap` and `newgidmap` to write the full mapping
-   - Parent closes the pipe → child's `read` returns → child proceeds with setup
+2. **Mapping** (Rust init chain in `init.rs`):
+   - Child `unshare(CLONE_NEWUSER)`, blocks on sync pipe
+   - Parent calls `newuidmap`/`newgidmap` with full range (if available)
+   - Falls back to writing `/proc/{pid}/uid_map` directly with single mapping
+   - Parent signals child via pipe → child proceeds with setup
 
-3. **Graceful fallback**: If `newuidmap` or `/etc/subuid` is not available, falls back to `--map-root-user` (original behavior, only uid 0 mapped).
-
-**Files changed:**
-- `_shell.py`: Added `subuid_range` parameter, pipe-based sync between parent and child, `newuidmap`/`newgidmap` calls after namespace creation
-- `sandbox.py`: Added `_detect_subuid_range()` that auto-detects `/etc/subuid` config; graceful fallback to `--map-root-user` if unavailable
+3. **Result**: Full UID mapping enables `apt-get`, `useradd`, `chown`, `setgroups()`.
 
 ### Host Setup (One-Time)
 
-#### 1. Install uidmap
-
 ```bash
 sudo apt-get install -y uidmap
-```
-
-Provides `newuidmap` and `newgidmap` (setuid-root binaries). Already installed on most systems with Docker rootless or Podman.
-
-#### 2. Configure subordinate UID/GID ranges
-
-```bash
-# Check if your user already has an entry
-grep $(whoami) /etc/subuid
-
-# If not, add one (pick a range that doesn't overlap with existing entries)
 echo "$(whoami):200000:65536" | sudo tee -a /etc/subuid
 echo "$(whoami):200000:65536" | sudo tee -a /etc/subgid
 ```
 
-**Notes:**
-- `useradd` automatically configures this for local users. LDAP/AD domain users typically need manual setup.
-- The range 200000-265535 is arbitrary — just avoid overlapping with other users' ranges (check existing entries in `/etc/subuid`).
-- This is the same mechanism used by Docker rootless mode and Podman.
-- Zero risk to host: these UIDs are only used inside user namespaces and don't correspond to any real user accounts.
-
-#### 3. Verify
-
-```bash
-# Should show the range you configured
-grep $(whoami) /etc/subuid
-# e.g.: jingyang:200000:65536
-
-# Quick test
-python3 -c "
-from nitrobox import Sandbox, SandboxConfig
-sb = Sandbox(SandboxConfig(image='ubuntu:22.04'), 'test')
-out, _ = sb.run('cat /proc/self/uid_map')
-print(out)
-# Should show TWO lines (full mapping), not one:
-#   0  <your_uid>      1
-#   1     200000  65536
-out, _ = sb.run('apt-get update 2>&1')
-print('apt-get works' if 'Fetched' in out or 'Hit' in out else 'apt-get failed')
-sb.delete()
-"
-```
-
-### Comparison
-
-| Capability | `--map-root-user` (fallback) | Full UID mapping |
-|---|---|---|
-| Run commands as root | Yes | Yes |
-| `apt-get install` | No (`seteuid` fails) | Yes |
-| `useradd` / `chown` non-root | No | Yes |
-| `setgroups()` | No | Yes |
-| Requires `/etc/subuid` | No | Yes |
-| Requires `uidmap` package | No | Yes |
-
 ## Fix 2: DNS Propagation
 
-**Problem:** `apt-get update` fails to connect to package repos. `Ign:1 http://archive.ubuntu.com/ubuntu noble InRelease` — DNS resolution fails.
+**Problem:** `apt-get update` fails — DNS resolution doesn't work inside the sandbox.
 
-**Root cause:** Docker-exported rootfs has an empty `/etc/resolv.conf`. Docker normally bind-mounts the host's resolv.conf at container runtime; the export doesn't include that mount.
+**Root cause:** Docker-exported rootfs has an empty `/etc/resolv.conf`. Docker normally bind-mounts the host's resolv.conf at runtime; the export doesn't include that.
 
-**Fix:** In the userns setup script, copy host's `/etc/resolv.conf` into sandbox if the sandbox one is empty:
-```bash
-if [ ! -s ${merged}/etc/resolv.conf ] && [ -s /etc/resolv.conf ]; then
-  cp /etc/resolv.conf ${merged}/etc/resolv.conf 2>/dev/null || true
-fi
-```
-
-**File changed:** `sandbox.py` (`_generate_userns_setup_script`)
+**Fix:** Rust init chain's `propagate_dns()` copies the host's `/etc/resolv.conf` into the sandbox rootfs if the sandbox copy is empty or missing. Runs in userns mode after overlayfs mount.
 
 ## Fix 3: `/tmp` Permissions
 
-**Problem:** `apt-key` fails with `Couldn't create temporary file /tmp/apt.conf.xxx`. The `_apt` user (uid 42) can't write to `/tmp`.
+**Problem:** `apt-key` fails with `Couldn't create temporary file /tmp/apt.conf.xxx`.
 
-**Root cause:** Docker-exported rootfs has `/tmp` with permissions `775` (owner=rwx, group=rwx, others=r-x) instead of the standard `1777` (world-writable + sticky). The `_apt` user is "others" and can't write.
+**Root cause:** Docker-exported rootfs has `/tmp` with `775` instead of `1777`. The `_apt` user can't write.
 
-**Fix:** `chmod 1777` in the setup script:
-```bash
-chmod 1777 ${merged}/tmp 2>/dev/null || true
-```
+**Fix:** Rust init chain's `fix_tmp_perms()` does `fchmodat(/tmp, 0o1777)` in userns mode after overlayfs mount.
 
-**File changed:** `sandbox.py` (`_generate_userns_setup_script`)
+## Fix 4: `/dev` Setup in Userns Mode
 
-## Fix 4: Skip Rust init chain `/dev` setup in Userns Mode
+**Problem:** Programs fail because `/dev/null`, `/dev/zero`, etc. are missing or broken.
 
-**Problem:** `apt-get update` reports `gpgv not installed` even though `/usr/bin/gpgv` exists and works. tmux fails with `create window failed: fork failed: No such file or directory`.
+**Root cause:** User namespaces can't create device nodes via `mknod` (requires real root).
 
-**Root cause:** The Rust init chain (security primitives, formerly `nbx-seccomp`) re-mounts `/dev` as an empty tmpfs, then creates device nodes via `mknod`. In userns mode, `mknod` silently fails (requires real root). This leaves `/dev/null`, `/dev/zero`, etc. missing. Consequences:
-- `apt-key`: `cannot create /dev/null: Permission denied` → gpgv verification fails
-- `tmux`: no `/dev/pts` (devpts not mounted) → PTY allocation fails
+**Fix:** Rust init chain's `setup_dev_rootless()`:
+1. Mounts tmpfs at `/dev`
+2. Bind-mounts individual device nodes from host (`/dev/null`, `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom`, `/dev/tty`)
+3. Creates symlinks (`/dev/fd`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr` → `/proc/self/fd/*`)
+4. Mounts `devpts` at `/dev/pts` with `newinstance,ptmxmode=0666`
+5. Creates `/dev/ptmx` → `pts/ptmx` symlink
 
-The setup script had already correctly set up `/dev` (bind-mounting from host) and `/dev/pts`, but the Rust init chain overwrote everything.
-
-**Fix (original):** Skip the Rust init chain in userns mode. The setup script already handles `/proc`, `/dev`, and volume mounts.
-
-**Fix (current):** The Rust init chain now supports a `/tmp/.nbx_skip_dev` marker file. When present, it skips `/proc`+`/dev` mount (setup script handles these) but keeps capability drop, path masking, read-only paths, and seccomp BPF. This gives rootless mode full security hardening.
-
-Additionally, mount `devpts` in the setup script (previously only done by the Rust init chain):
-```bash
-mount -t devpts devpts ${merged}/dev/pts -o nosuid,newinstance,ptmxmode=0666
-ln -sf pts/ptmx ${merged}/dev/ptmx
-```
-
-**File changed:** `sandbox.py` (`_generate_userns_setup_script`)
-
-**DONE:** seccomp BPF, capability drop, masked paths, and read-only paths are now all active in rootless mode via the `nbx_skip_dev` mechanism.
+This differs from rootful mode, which creates real device nodes via `mknod`.
 
 ## Fix 5: `ExecResult.stderr` Must Be String (SkyRL side)
 
 **Problem:** Harbor's terminus-2 agent crashes with `AttributeError: 'NoneType' object has no attribute 'strip'` on `set_history_result.stderr.strip()`.
 
-**Root cause:** nitrobox merges stderr into stdout. The environment provider returned `stderr=None` in `ExecResult`, but Harbor expects a string.
+**Root cause:** nitrobox merges stderr into stdout. The environment provider returned `stderr=None`, but Harbor expects a string.
 
-**Fix:** Return `stderr=""` instead of `stderr=None`.
+**Fix:** Return `stderr=""` instead of `stderr=None` in `nitrobox_environment.py`.
 
-**File changed:** `nitrobox_environment.py` (SkyRL side)
+## Architecture Note
+
+All initialization (namespace setup, UID mapping, mounts, device creation, security hardening) is handled by the **Rust init chain** (`rust/src/init.rs`). There is no Python-side setup script generation. The Python `Sandbox` class builds a config dict and passes it to `py_spawn_sandbox()`, which calls the Rust child init function.
 
 ## All Files Changed
 
@@ -198,49 +90,28 @@ ln -sf pts/ptmx ${merged}/dev/ptmx
 
 | File | Changes |
 |---|---|
-| `src/nitrobox/_shell.py` | `subuid_range` param, pipe sync, `newuidmap`/`newgidmap` |
-| `src/nitrobox/sandbox.py` | `_detect_subuid_range()`, DNS propagation, `/tmp` chmod, devpts mount, skip Rust init chain `/dev` setup in userns |
+| `rust/src/init.rs` | Full init chain: userns/rootful auto-detect, UID mapping, overlayfs, dev setup, DNS, /tmp perms, security |
+| `src/nitrobox/sandbox.py` | `_detect_subuid_range()`, auto-select rootful/userns |
+| `src/nitrobox/_shell.py` | `subuid_range` param forwarded to Rust spawn |
 
 ### SkyRL
 
 | File | Changes |
 |---|---|
-| `examples/.../nitrobox_environment.py` | Use `Sandbox()` factory (not `NamespaceSandbox`), remove `use_sudo`, `stderr=""` |
+| `examples/.../nitrobox_environment.py` | Use `Sandbox()` (auto-detect), `stderr=""` |
 | `examples/.../run_harbor_gen_nitrobox.sh` | `NUM_GPUS` from env var with default |
 
-## Debugging Notes
-
-Useful commands for debugging sandbox issues:
+## Debugging
 
 ```python
 from nitrobox import Sandbox, SandboxConfig
-config = SandboxConfig(image='<rootfs_path>', working_dir='/app')
-sb = Sandbox(config, 'debug')
+sb = Sandbox(SandboxConfig(image='ubuntu:22.04'), 'debug')
 
-# Check uid mapping
-sb.run('cat /proc/self/uid_map')
-
-# Check DNS
-sb.run('cat /etc/resolv.conf')
-
-# Check /dev
-sb.run('ls -la /dev/null /dev/pts/')
-
-# Check devpts
-sb.run('mount | grep pts')
-
-# Test apt-get
-sb.run('apt-get update 2>&1', timeout=60)
-
-# Test tmux
-sb.run('apt-get install -y tmux 2>&1', timeout=120)
-sb.run('tmux new-session -d -s test 2>&1')
-sb.run('tmux list-sessions')
+sb.run('cat /proc/self/uid_map')    # Should show full mapping (2 lines)
+sb.run('cat /etc/resolv.conf')      # Should have nameserver entries
+sb.run('ls -la /dev/null /dev/pts/') # Should exist
+sb.run('stat -c %a /tmp')           # Should be 1777
+sb.run('apt-get update 2>&1', timeout=60)  # Should work
 
 sb.delete()
-```
-
-To force SkyRL to pick up nitrobox changes:
-```bash
-uv cache clean nitrobox --force
 ```

@@ -2,7 +2,7 @@
 
 ## Overview
 
-We built an integration to replace Harbor's `DockerEnvironment` with nitrobox in the SkyRL RL training framework. The goal is to speed up rollout by eliminating Docker container overhead during training. This document summarizes the integration architecture, what was implemented, and the **unresolved Ray permission problem** that blocks end-to-end testing.
+nitrobox replaces Harbor's `DockerEnvironment` in the SkyRL RL training framework, eliminating Docker container overhead during training rollouts. With userns mode (rootless), no root privileges are required — nitrobox runs as a normal user via Linux user namespaces.
 
 ## Architecture
 
@@ -32,7 +32,7 @@ Implements Harbor's `BaseEnvironment` interface:
 
 | Harbor method | nitrobox mapping |
 |---|---|
-| `start(force_build)` | Build Dockerfile → export rootfs (cached by content hash) → `NamespaceSandbox(config)` |
+| `start(force_build)` | Build Dockerfile → export rootfs (cached by content hash) → `Sandbox(config)` |
 | `exec(cmd, cwd, env)` | `sb.run(cmd)` with cwd/env prepended via shell |
 | `upload_file/dir` | `sb.copy_to()` or direct `shutil.copytree` on rootfs |
 | `download_file/dir` | `sb.copy_from()` or direct `shutil.copytree` on rootfs |
@@ -68,90 +68,58 @@ harbor = [
 nitrobox = { path = "/scratch/jingyang/nitrobox" }
 ```
 
-## The Ray Permission Problem
+## Running Without Root (Userns Mode)
 
-### Root Cause
+nitrobox auto-detects privileges: when running as a non-root user, it uses Linux user namespaces (userns mode). This eliminates the Ray permission problem — **no root or sudo required**.
 
-nitrobox's `NamespaceSandbox` requires root privileges for:
-- `unshare --pid --mount --fork` (Linux namespace creation)
-- `mount -t overlay` (overlayfs for copy-on-write filesystem)
-- `mount --bind` (volume mounts)
-- `chroot` (filesystem root isolation)
-- cgroup v2 writes (resource limits)
+### How It Works
 
-The `Sandbox()` factory function checks `os.geteuid() == 0`:
-- If root → `NamespaceSandbox` (full isolation)
-- If not root → `LandlockSandbox` (rootless fallback, no chroot/namespace)
+`Sandbox.__init__()` checks `os.geteuid()`:
+- **UID 0** → rootful mode (real root, mount/unshare directly)
+- **Non-zero UID** → userns mode (user namespaces, no root needed)
 
-### Why `sudo` Doesn't Work
+In userns mode, the Rust init chain:
+1. `unshare(CLONE_NEWUSER)` to create a new user namespace
+2. Parent calls `newuidmap`/`newgidmap` for full UID mapping (if `/etc/subuid` configured)
+3. All mounts (overlayfs, proc, dev, volumes) happen inside the namespace
+4. Security hardening (seccomp, capabilities, landlock) is applied
+5. Mounts auto-cleanup when the shell process exits (no manual umount needed)
 
-SkyRL runs on Ray. The execution flow is:
-
-```
-User runs: sudo bash run_harbor_gen_nitrobox.sh     ← root
-  → sudo uv run ... main_harbor_generate               ← root
-    → ray.get(skyrl_entrypoint.remote(cfg))             ← submits task to Ray
-      → Ray worker picks up the task                    ← jingyang (NOT root)
-        → HarborGenerator.harbor_agent_loop()           ← jingyang
-          → NitroBoxLiteEnvironment.start()           ← jingyang
-            → Sandbox() → os.geteuid() != 0             ← FAILS
-              → LandlockSandbox → mkdir('/app')          ← PermissionError
-```
-
-**The `sudo` only affects the script that submits the task. The Ray worker that actually executes the code runs as the user who started the Ray cluster (`jingyang`).**
-
-### Approaches Tried
-
-| Approach | Result |
-|---|---|
-| `sudo bash run_xxx.sh` | Script runs as root, but Ray workers are still `jingyang` |
-| `sudo -E bash run_xxx.sh` | Same — `-E` preserves env vars but doesn't change Ray worker uid |
-| `sudo ray start --head` | Starts a new Ray session as root, but all packages need to be re-downloaded/built from scratch (uv creates isolated envs per session). Killed after 10+ min of downloading ~2GB of packages. |
-| Force `NamespaceSandbox` via direct import (bypassing factory) | Still fails — the worker process itself lacks privileges for mount/unshare |
-| Add `use_sudo` flag to prepend `sudo` to privileged subprocess calls | Implemented but reverted — `sudo rm -rf` in cleanup paths felt unsafe. Also requires passwordless sudo configured for the user. |
-
-### Recommended Solutions (For Discussion)
-
-#### Option A: Run Ray cluster as root
-Start the Ray cluster with root privileges so all workers inherit root. This requires ensuring `uv` and all dependencies are accessible to root, and that the uv package cache is shared (to avoid re-downloading everything).
+### Host Setup (One-Time)
 
 ```bash
-sudo env PATH="/home/jingyang/.local/bin:$PATH" ray start --head
+# Install uidmap (provides newuidmap/newgidmap)
+sudo apt-get install -y uidmap
+
+# Configure subordinate UID/GID ranges
+echo "$(whoami):200000:65536" | sudo tee -a /etc/subuid
+echo "$(whoami):200000:65536" | sudo tee -a /etc/subgid
+
+# Enable unprivileged user namespaces (if not already)
+sudo sysctl -w kernel.unprivileged_userns_clone=1
 ```
 
-Tradeoff: One-time setup cost to populate the package cache for root. All subsequent runs would be fast.
+### Ray Integration
 
-#### Option B: `use_sudo` with safety guards
-Add a `use_sudo=True` option to `SandboxConfig` that prepends `sudo` to privileged commands (`mount`, `unshare`, `umount`, etc.). Requires:
-1. Passwordless sudo for the user (already available)
-2. Safety guards on `sudo rm -rf` (whitelist allowed path prefixes)
-3. Changes to `NamespaceSandbox`, `_PersistentShell`, and cgroup management code
+Since userns mode doesn't need root, it works directly in Ray workers:
 
-A partial implementation was done and reverted. The main concern was `sudo rm -rf` in `delete()` and `_reset_overlayfs()`. A safe version would restrict deletion to paths under a dedicated prefix (e.g., `/var/lib/nitrobox/`) rather than `/tmp/`.
+```
+Ray worker (jingyang)
+  → NitroBoxLiteEnvironment.start()
+    → Sandbox(config)                # euid != 0 → userns mode
+      → Rust init: unshare(CLONE_NEWUSER) + full UID mapping
+    → Works without root ✓
+```
 
-#### Option C: Linux capabilities instead of full root
-Grant the Ray worker process specific capabilities instead of full root:
+No need to run the Ray cluster as root.
+
+## Standalone Benchmark
+
+The A/B comparison benchmark in `examples/benchmark.py` matches Harbor's Docker flow (`docker build` → `docker run -d` → `docker exec` × N → `docker rm -f`):
+
 ```bash
-sudo setcap cap_sys_admin,cap_sys_chroot+ep $(which python3)
+python examples/benchmark.py
 ```
-This avoids running as root entirely. The `cap_sys_admin` capability allows `mount`/`unshare`, and `cap_sys_chroot` allows `chroot`. However, setting capabilities on the Python binary may have security implications and may not survive `uv`'s isolated environments (which use symlinked/copied Python binaries).
-
-#### Option D: Rootless user namespaces (longer-term)
-Use `unshare --user --map-root-user` to create unprivileged user namespaces. This allows mount/chroot inside the namespace without any root or capabilities. However:
-- Requires `sysctl kernel.unprivileged_userns_clone=1` (may not be enabled)
-- Overlayfs inside user namespaces requires kernel ≥5.11
-- More complex implementation
-
-## Standalone Benchmark (Working)
-
-A Docker comparison benchmark was added to `tests/test_sandbox.py::TestDockerComparison`. This runs without Ray and directly compares nitrobox vs Docker:
-
-```bash
-cd /scratch/jingyang/nitrobox
-sudo python -m pytest tests/test_sandbox.py::TestDockerComparison -v -s
-```
-
-This test matches Harbor's Docker flow: `docker build` → `docker run -d` → `docker exec` (N times) → `docker rm -f`, and prints a side-by-side timing comparison table.
 
 ## File Inventory
 
@@ -161,4 +129,4 @@ This test matches Harbor's Docker flow: `docker build` → `docker run -d` → `
 | `run_harbor_gen_nitrobox.sh` | same directory | Generation-only test script |
 | `run_codecontest_nitrobox.sh` | same directory | Full training test script |
 | `NITROBOX_INTEGRATION.md` | same directory | Quick-reference doc |
-| `TestDockerComparison` | `nitrobox/tests/test_sandbox.py` | A/B benchmark test |
+| `benchmark.py` | `examples/` | A/B benchmark (Harbor-style flow) |
