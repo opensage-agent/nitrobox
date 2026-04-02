@@ -81,37 +81,10 @@ def _convert_whiteouts_in_layer(layer_dir: Path, strategy: str = "") -> None:
         _convert_whiteouts_in_userns(layer_dir)
         return
 
-    is_user = strategy == "xattr"
-    xattr_prefix = "user.overlay" if is_user else "trusted.overlay"
-
-    for dirpath, _dirnames, filenames in os.walk(layer_dir):
-        dp = Path(dirpath)
-        for fname in filenames:
-            if not fname.startswith(".wh."):
-                continue
-            wh_path = dp / fname
-            if fname == ".wh..wh..opq":
-                wh_path.unlink()
-                subprocess.run(
-                    ["setfattr", "-n", f"{xattr_prefix}.opaque",
-                     "-v", "x" if is_user else "y", str(dp)],
-                    capture_output=True,
-                )
-            else:
-                target_name = fname[4:]  # strip ".wh." prefix
-                target_path = dp / target_name
-                wh_path.unlink()
-                if is_user:
-                    # xattr-based whiteout: regular file + user.overlay.whiteout
-                    target_path.touch()
-                    subprocess.run(
-                        ["setfattr", "-n", f"{xattr_prefix}.whiteout",
-                         "-v", "y", str(target_path)],
-                        capture_output=True,
-                    )
-                else:
-                    # char device (0,0) whiteout
-                    os.mknod(str(target_path), 0o600 | 0o020000, os.makedev(0, 0))
+    # Use Rust implementation: direct setxattr/mknod syscalls,
+    # ~100x faster than spawning setfattr per file.
+    from nitrobox._core import py_convert_whiteouts
+    py_convert_whiteouts(str(layer_dir), strategy == "xattr")
 
 
 def _convert_whiteouts_in_userns(layer_dir: Path) -> None:

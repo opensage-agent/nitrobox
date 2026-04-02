@@ -9,6 +9,7 @@ pub mod mount;
 pub mod pidfd;
 pub mod qmp;
 pub mod security;
+pub mod whiteout;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
@@ -346,6 +347,23 @@ fn py_qmp_send(socket_path: &str, command_json: &str, timeout_secs: u64) -> PyRe
 }
 
 // ======================================================================
+// Whiteout conversion
+// ======================================================================
+
+/// Convert OCI `.wh.*` whiteout files to overlayfs-native format.
+///
+/// Walks *layer_dir* and replaces sentinel files with xattrs (rootless)
+/// or char-device (0,0) nodes (root).  Returns the number of files
+/// converted.  ~100x faster than the subprocess-per-file Python version.
+#[gen_stub_pyfunction]
+#[pyfunction]
+#[pyo3(signature = (layer_dir, use_user_xattr = true))]
+fn py_convert_whiteouts(layer_dir: &str, use_user_xattr: bool) -> PyResult<u32> {
+    whiteout::convert_whiteouts(std::path::Path::new(layer_dir), use_user_xattr)
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+// ======================================================================
 // Module definition
 // ======================================================================
 
@@ -385,6 +403,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // qmp
     m.add_function(wrap_pyfunction!(py_qmp_send, m)?)?;
+
+    // whiteout
+    m.add_function(wrap_pyfunction!(py_convert_whiteouts, m)?)?;
 
     Ok(())
 }
