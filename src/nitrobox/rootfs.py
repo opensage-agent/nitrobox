@@ -243,7 +243,9 @@ def prepare_rootfs_layers_from_docker(
     # entirely when all layers are already cached.
     diff_ids = _get_manifest_diff_ids(cache_dir, image_name)
     if diff_ids:
-        layer_dirs = [layers_dir / _safe_cache_key(did) for did in diff_ids]
+        layer_dirs = list(dict.fromkeys(
+            layers_dir / _safe_cache_key(did) for did in diff_ids
+        ))
         if all(d.exists() for d in layer_dirs):
             logger.info("All %d layers cached for %s", len(layer_dirs), image_name)
             return layer_dirs
@@ -261,7 +263,9 @@ def prepare_rootfs_layers_from_docker(
         )
 
     # Check again with fresh diff_ids (image may have been updated)
-    layer_dirs = [layers_dir / _safe_cache_key(did) for did in diff_ids]
+    layer_dirs = list(dict.fromkeys(
+        layers_dir / _safe_cache_key(did) for did in diff_ids
+    ))
     if all(d.exists() for d in layer_dirs):
         logger.info("All %d layers cached for %s", len(layer_dirs), image_name)
         _write_manifest(cache_dir, image_name, diff_ids)
@@ -288,8 +292,17 @@ def prepare_rootfs_layers_from_docker(
         _extract_layers_from_registry(image_name, needed, layers_dir)
 
     _write_manifest(cache_dir, image_name, diff_ids)
-    logger.info("Layer cache ready for %s: %d layers", image_name, len(layer_dirs))
-    return layer_dirs
+    # Deduplicate layers preserving order (overlayfs ELOOP on duplicate lowerdir).
+    seen: set[Path] = set()
+    unique_dirs: list[Path] = []
+    for d in layer_dirs:
+        if d not in seen:
+            seen.add(d)
+            unique_dirs.append(d)
+    if len(unique_dirs) < len(layer_dirs):
+        logger.debug("Deduplicated %d → %d layers", len(layer_dirs), len(unique_dirs))
+    logger.info("Layer cache ready for %s: %d layers", image_name, len(unique_dirs))
+    return unique_dirs
 
 
 

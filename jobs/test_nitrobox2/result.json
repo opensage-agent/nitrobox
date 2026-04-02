@@ -1,0 +1,29 @@
+{
+    "id": "b17953c3-9a4e-4675-93b5-b320009c80bd",
+    "started_at": "2026-04-02T19:57:27.035359",
+    "finished_at": "2026-04-02T19:57:36.878385",
+    "n_total_trials": 1,
+    "stats": {
+        "n_trials": 1,
+        "n_errors": 0,
+        "evals": {
+            "oracle__swebench-verified": {
+                "n_trials": 1,
+                "n_errors": 0,
+                "metrics": [
+                    {
+                        "mean": 1.0
+                    }
+                ],
+                "reward_stats": {
+                    "reward": {
+                        "1.0": [
+                            "django__django-15252__6vvLUuZ"
+                        ]
+                    }
+                },
+                "exception_stats": {}
+            }
+        }
+    }
+}
