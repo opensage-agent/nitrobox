@@ -143,13 +143,16 @@ class QemuVM:
             # in Apple SMC key) break when double-shell-wrapped.  Write
             # to a script file to avoid quoting issues.
             #
-            # Use a path on a volume mount (not /tmp which may be tmpfs
-            # in vm_mode, hiding overlayfs writes from write_file).
-            # QMP socket dir is on a volume, use its parent.
+            # Use sb.run() to write the script — write_file() goes to the
+            # overlayfs upper layer which is hidden by bind mounts, so
+            # scripts on volume paths would be invisible to the shell.
             script_path = str(Path(self._qmp_path).parent / ".nbx_qemu_launch.sh")
-            script = f"#!/bin/sh\nexec {cmd}\n"
-            self._sb.write_file(script_path, script)
-            self._sb.run(f"chmod +x {shlex.quote(script_path)}")
+            escaped_cmd = cmd.replace("'", "'\\''")
+            self._sb.run(
+                f"printf '#!/bin/sh\\nexec %s\\n' '{escaped_cmd}' "
+                f"> {shlex.quote(script_path)} && "
+                f"chmod +x {shlex.quote(script_path)}",
+            )
             self._handle = self._sb.run_background(script_path)
         else:
             self._handle = self._sb.run_background(cmd)
@@ -175,14 +178,16 @@ class QemuVM:
             except Exception:
                 pass
             self._handle = None
-        # Clean up socket files (QEMU doesn't always remove them,
-        # especially on volume mounts that survive sandbox deletion).
-        if self._sb is not None:
-            for sock_path in (self._qmp_path, self._qga_path):
-                try:
-                    self._sb.run(f"rm -f {shlex.quote(sock_path)}", timeout=5)
-                except Exception:
-                    pass
+        # Clean up socket files from the host side.  QEMU doesn't always
+        # remove them, and volume-mount sockets survive sandbox deletion.
+        # Resolve host paths first, then unlink — no dependency on the
+        # sandbox shell being alive.
+        for sock_path in (self._qmp_path, self._qga_path):
+            try:
+                host = self._resolve_host_socket(sock_path)
+                Path(host).unlink(missing_ok=True)
+            except (FileNotFoundError, OSError, AttributeError):
+                pass
         logger.info("VM stopped")
 
     @property
