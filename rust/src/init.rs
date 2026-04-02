@@ -1194,10 +1194,6 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
                         _ => {}
                     }
                 } else {
-                    log::warn!(
-                        "Using single-UID mapping (only root). \
-                         Install 'uidmap' package for full multi-UID support."
-                    );
                     if let Err(e) = std::fs::write(format!("/proc/{pid_s}/setgroups"), "deny\n") {
                         log::warn!("write setgroups failed: {e}");
                     }
