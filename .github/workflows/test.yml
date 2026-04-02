@@ -36,6 +36,9 @@ jobs:
       - run: python -m pytest tests/test_security.py -v -k "UserNamespace"
       - run: python -m pytest tests/test_compose.py -v
       - run: python -m pytest tests/test_cli.py -v
+      - run: python -m pytest tests/test_registry.py -v
+      - run: python -m pytest tests/test_whiteout.py -v
+      - run: python -m pytest tests/test_rust_core.py -v
 
   root:
     name: Root (${{ matrix.os }}, py${{ matrix.python-version }})
@@ -59,6 +62,8 @@ jobs:
       - run: pip install -e ".[dev]"
       - run: sudo -E $(which python) -m pytest tests/test_sandbox.py tests/test_security.py -v -k "not UserNamespace"
       - run: sudo -E $(which python) -m pytest tests/test_checkpoint.py -v
+      - run: sudo -E $(which python) -m pytest tests/test_rust_core.py -v
+      - run: sudo -E $(which python) -m pytest tests/test_whiteout.py -v
 
   lint:
     name: Lint
