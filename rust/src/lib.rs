@@ -9,6 +9,7 @@ pub mod mount;
 pub mod pidfd;
 pub mod qmp;
 pub mod security;
+pub mod userns;
 pub mod whiteout;
 
 use pyo3::prelude::*;
@@ -347,6 +348,22 @@ fn py_qmp_send(socket_path: &str, command_json: &str, timeout_secs: u64) -> PyRe
 }
 
 // ======================================================================
+// User namespace cleanup
+// ======================================================================
+
+/// Enter a user namespace and recursively fix permissions + ownership.
+///
+/// Forks, ``setns()`` into the user namespace of *userns_pid*, then
+/// walks *dir_path* doing ``chmod(a+rwX)`` + ``lchown(0,0)`` so that
+/// the host user can ``rmtree`` the directory after sandbox deletion.
+#[gen_stub_pyfunction]
+#[pyfunction]
+fn py_userns_fixup_for_delete(userns_pid: i32, dir_path: &str) -> PyResult<u32> {
+    userns::fixup_dir_for_delete(userns_pid, std::path::Path::new(dir_path))
+        .map_err(|e| pyo3::exceptions::PyOSError::new_err(e.to_string()))
+}
+
+// ======================================================================
 // Whiteout conversion
 // ======================================================================
 
@@ -406,6 +423,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // whiteout
     m.add_function(wrap_pyfunction!(py_convert_whiteouts, m)?)?;
+
+    // userns cleanup
+    m.add_function(wrap_pyfunction!(py_userns_fixup_for_delete, m)?)?;
 
     Ok(())
 }

@@ -1679,49 +1679,40 @@ class Sandbox:
 
         In userns mode, non-root users inside the sandbox (e.g. _apt,
         www-data) create files with mapped UIDs that the host user can't
-        delete.  We chmod only the overlayfs upper dir (not the entire
-        rootfs) to keep this fast.
+        delete.  Uses Rust ``py_userns_fixup_for_delete`` to fork, enter
+        the user namespace via ``setns()``, and recursively chmod+chown
+        the overlayfs upper dir — no ``nsenter`` subprocess needed.
         """
         if not self._userns:
             return
         upper = getattr(self, "_upper_dir", None)
-        if not upper:
+        if not upper or not upper.exists():
             return
         shell = self._persistent_shell
         if not shell.alive:
             return
-        # The upper dir is at a host path; inside the sandbox it's not
-        # directly visible. Use the host-relative path via /proc/self
-        # trick: the sandbox shell can access its own rootfs overlay.
-        # Simpler: just chmod the host path from inside the userns via
-        # nsenter, since we need the userns uid mapping to own the files.
-        pid = shell.pid
         try:
-            subprocess.run(
-                ["nsenter", f"--user=/proc/{pid}/ns/user", "--",
-                 "chmod", "-R", "a+rwX", str(upper)],
-                capture_output=True, timeout=30,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass
+            from nitrobox._core import py_userns_fixup_for_delete
+            py_userns_fixup_for_delete(shell.pid, str(upper))
+        except (OSError, ImportError) as e:
+            logger.debug("_fixup_userns_permissions: %s", e)
 
     def _fixup_userns_ownership(self) -> None:
-        """Fix ownership of files created by mapped uids before killing shell."""
+        """Fix ownership of files in env_dir created by mapped uids.
+
+        Uses Rust ``py_userns_fixup_for_delete`` to enter the user
+        namespace and recursively lchown to root (= host user outside
+        the namespace).
+        """
         if not self._userns or not self._subuid_range:
             return
         shell = self._persistent_shell
         if not shell.alive:
             return
-        pid = shell.pid
         try:
-            subprocess.run(
-                [
-                    "nsenter", f"--user=/proc/{pid}/ns/user", "--",
-                    "chown", "-Rh", "0:0", str(self._env_dir),
-                ],
-                capture_output=True, timeout=60,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+            from nitrobox._core import py_userns_fixup_for_delete
+            py_userns_fixup_for_delete(shell.pid, str(self._env_dir))
+        except (OSError, ImportError) as e:
             logger.warning("_fixup_userns_ownership failed: %s", e)
 
     def _cleanup_dead_dirs(self) -> None:
