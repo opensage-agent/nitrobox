@@ -433,6 +433,15 @@ def prepare_rootfs_layers_from_docker(
                 f"registry or Docker."
             ) from e
 
+    # Verify ALL layers were extracted before writing the manifest.
+    still_missing = [d for d in layer_dirs if not d.exists()]
+    if still_missing:
+        names = [d.name for d in still_missing[:3]]
+        raise RuntimeError(
+            f"Layer extraction incomplete for {image_name!r}: "
+            f"{len(still_missing)} layer(s) missing ({', '.join(names)})"
+        )
+
     _write_manifest(cache_dir, image_name, diff_ids, image_config=img_config)
     # Deduplicate layers preserving order (overlayfs ELOOP on duplicate lowerdir).
     seen: set[Path] = set()
