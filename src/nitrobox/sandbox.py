@@ -116,9 +116,9 @@ class Sandbox:
         from nitrobox import Sandbox, SandboxConfig
 
         config = SandboxConfig(image="ubuntu:22.04", working_dir="/workspace")
-        with Sandbox(config, name="worker-0") as sb:
-            output, ec = sb.run("echo hello world")
-            sb.reset()        # instant filesystem reset
+        with Sandbox(config, name="worker-0") as box:
+            output, ec = box.run("echo hello world")
+            box.reset()        # instant filesystem reset
     """
 
     SUPPORTED_FS_BACKENDS = ("overlayfs", "btrfs")
@@ -760,9 +760,9 @@ class Sandbox:
 
     @classmethod
     def _atexit_cleanup(cls) -> None:
-        for sb in list(cls._live_instances):
+        for box in list(cls._live_instances):
             try:
-                sb.delete()
+                box.delete()
             except Exception:
                 pass
         cls._live_instances.clear()

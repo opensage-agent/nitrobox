@@ -44,9 +44,9 @@ def sandbox(tmp_path, shared_cache_dir):
         env_base_dir=str(tmp_path / "envs"),
         rootfs_cache_dir=shared_cache_dir,
     )
-    sb = Sandbox(config, name="ckpt-test")
-    yield sb
-    sb.delete()
+    box = Sandbox(config, name="ckpt-test")
+    yield box
+    box.delete()
 
 
 @pytest.fixture

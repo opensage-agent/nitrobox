@@ -227,26 +227,26 @@ def bench_opensandbox() -> dict | None:
 
         # Create
         t0 = time.monotonic()
-        sb = await _create()
+        box = await _create()
         create_ms = (time.monotonic() - t0) * 1000
 
         # Per-command latency
         cmd_times = []
         for i in range(N_COMMANDS):
             t0 = time.monotonic()
-            await sb.commands.run(f"echo iteration-{i}")
+            await box.commands.run(f"echo iteration-{i}")
             cmd_times.append((time.monotonic() - t0) * 1000)
         avg_cmd_ms = sum(cmd_times) / len(cmd_times)
 
         # "Reset" = kill + create
         t0 = time.monotonic()
-        await sb.kill(); await sb.close()
-        sb = await _create()
+        await box.kill(); await box.close()
+        box = await _create()
         reset_ms = (time.monotonic() - t0) * 1000
 
         # Delete
         t0 = time.monotonic()
-        await sb.kill(); await sb.close()
+        await box.kill(); await box.close()
         delete_ms = (time.monotonic() - t0) * 1000
 
         return {"create_ms": create_ms, "cmd_ms": avg_cmd_ms,
@@ -267,15 +267,15 @@ def bench_opensandbox_throughput() -> dict | None:
 
         config = ConnectionConfig(domain=OPENSANDBOX_DOMAIN,
                                   request_timeout=timedelta(seconds=60))
-        sb = await OSSandbox.create(image=IMAGE, connection_config=config,
+        box = await OSSandbox.create(image=IMAGE, connection_config=config,
                                     timeout=timedelta(minutes=5))
-        await sb.commands.run("echo warmup")
+        await box.commands.run("echo warmup")
         N = 100
         t0 = time.monotonic()
         for i in range(N):
-            await sb.commands.run(f"echo {i}")
+            await box.commands.run(f"echo {i}")
         elapsed = time.monotonic() - t0
-        await sb.kill(); await sb.close()
+        await box.kill(); await box.close()
         return {"total_s": elapsed, "ops_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
 
     return asyncio.run(_run())
@@ -295,14 +295,14 @@ def bench_opensandbox_reset_loop() -> dict | None:
                                   request_timeout=timedelta(seconds=60))
         N = 20  # Fewer iterations — each reset is slow
         t0_total = time.monotonic()
-        sb = await OSSandbox.create(image=IMAGE, connection_config=config,
+        box = await OSSandbox.create(image=IMAGE, connection_config=config,
                                     timeout=timedelta(minutes=5))
         for i in range(N):
-            await sb.commands.run(f"echo episode-{i}")
-            await sb.kill(); await sb.close()
-            sb = await OSSandbox.create(image=IMAGE, connection_config=config,
+            await box.commands.run(f"echo episode-{i}")
+            await box.kill(); await box.close()
+            box = await OSSandbox.create(image=IMAGE, connection_config=config,
                                         timeout=timedelta(minutes=5))
-        await sb.kill(); await sb.close()
+        await box.kill(); await box.close()
         elapsed = time.monotonic() - t0_total
         return {"total_s": elapsed, "cycles_per_sec": N / elapsed, "avg_ms": elapsed / N * 1000}
 
@@ -432,25 +432,25 @@ def bench_sandbox() -> dict:
 
     # Create
     t0 = time.monotonic()
-    sb = Sandbox(config, name="nbx-bench-sandbox")
+    box = Sandbox(config, name="nbx-bench-sandbox")
     create_ms = (time.monotonic() - t0) * 1000
 
     # Per-command latency
     cmd_times = []
     for i in range(N_COMMANDS):
         t0 = time.monotonic()
-        sb.run(f"echo iteration-{i}")
+        box.run(f"echo iteration-{i}")
         cmd_times.append((time.monotonic() - t0) * 1000)
     avg_cmd_ms = sum(cmd_times) / len(cmd_times)
 
     # Reset
     t0 = time.monotonic()
-    sb.reset()
+    box.reset()
     reset_ms = (time.monotonic() - t0) * 1000
 
     # Delete
     t0 = time.monotonic()
-    sb.delete()
+    box.delete()
     delete_ms = (time.monotonic() - t0) * 1000
 
     return {
@@ -477,14 +477,14 @@ def bench_criu() -> dict | None:
     from nitrobox import Sandbox, SandboxConfig, CheckpointManager
 
     config = SandboxConfig(image=IMAGE, working_dir="/workspace")
-    sb = Sandbox(config, name="nbx-bench-criu")
+    box = Sandbox(config, name="nbx-bench-criu")
 
     if not CheckpointManager.check_available():
-        sb.delete()
+        box.delete()
         return None
 
-    mgr = CheckpointManager(sb)
-    sb.run("echo data > /workspace/test.txt")
+    mgr = CheckpointManager(box)
+    box.run("echo data > /workspace/test.txt")
 
     # Save latency
     save_times = []
@@ -498,12 +498,12 @@ def bench_criu() -> dict | None:
     # Restore latency
     restore_times = []
     for i in range(N_CRIU_ITERS):
-        sb.run("echo modified > /workspace/test.txt")
+        box.run("echo modified > /workspace/test.txt")
         t0 = time.monotonic()
         mgr.restore(f"/tmp/nbx_bench_ckpt_{i}")
         restore_times.append((time.monotonic() - t0) * 1000)
 
-    sb.delete()
+    box.delete()
     for i in range(N_CRIU_ITERS):
         shutil.rmtree(f"/tmp/nbx_bench_ckpt_{i}", ignore_errors=True)
 
@@ -522,12 +522,12 @@ def bench_throughput() -> dict:
     from nitrobox import Sandbox, SandboxConfig
     N = 1000
 
-    sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="nbx-bench-tp")
+    box = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="nbx-bench-tp")
     t0 = time.monotonic()
     for i in range(N):
-        sb.run(f"echo {i}")
+        box.run(f"echo {i}")
     elapsed = time.monotonic() - t0
-    sb.delete()
+    box.delete()
 
     return {
         "total_s": elapsed,
@@ -541,13 +541,13 @@ def bench_reset_loop() -> dict:
     from nitrobox import Sandbox, SandboxConfig
     N = 100
 
-    sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="nbx-bench-reset")
+    box = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="nbx-bench-reset")
     t0 = time.monotonic()
     for i in range(N):
-        sb.run(f"echo episode-{i} > /workspace/state.txt")
-        sb.reset()
+        box.run(f"echo episode-{i} > /workspace/state.txt")
+        box.reset()
     elapsed = time.monotonic() - t0
-    sb.delete()
+    box.delete()
 
     return {
         "total_s": elapsed,
@@ -566,26 +566,26 @@ def bench_checkpoint_loop() -> dict | None:
 
     from nitrobox import Sandbox, SandboxConfig, CheckpointManager
 
-    sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="nbx-bench-ckpt-loop")
+    box = Sandbox(SandboxConfig(image=IMAGE, working_dir="/workspace"), name="nbx-bench-ckpt-loop")
     if not CheckpointManager.check_available():
-        sb.delete()
+        box.delete()
         return None
 
-    mgr = CheckpointManager(sb)
+    mgr = CheckpointManager(box)
     N = 50
     ckpt = "/tmp/nbx_bench_ckpt_loop"
 
-    sb.run("echo base_state > /workspace/data.txt")
+    box.run("echo base_state > /workspace/data.txt")
     shutil.rmtree(ckpt, ignore_errors=True)
     mgr.save(ckpt)
 
     t0 = time.monotonic()
     for i in range(N):
-        sb.run(f"echo step-{i} >> /workspace/log.txt")
+        box.run(f"echo step-{i} >> /workspace/log.txt")
         mgr.restore(ckpt)
     elapsed = time.monotonic() - t0
 
-    sb.delete()
+    box.delete()
     shutil.rmtree(ckpt, ignore_errors=True)
 
     return {
@@ -600,7 +600,7 @@ def bench_ab_comparison() -> None:
 
     Matches Harbor's DockerEnvironment flow:
       Docker:           docker build → docker run -d → docker exec (N times) → docker rm -f
-      NitroBoxLite:  Sandbox(config) → sb.run() (N times) → sb.delete()
+      NitroBoxLite:  Sandbox(config) → box.run() (N times) → box.delete()
     """
     from nitrobox import Sandbox, SandboxConfig
 
@@ -620,7 +620,7 @@ def bench_ab_comparison() -> None:
     # ── NitroBoxLite ──
     config = SandboxConfig(image=IMAGE, working_dir="/app")
     t0 = time.monotonic()
-    sb = Sandbox(config, name="bench-ab")
+    box = Sandbox(config, name="bench-ab")
     nbx_start = (time.monotonic() - t0) * 1000
 
     # Run each command N_ROUNDS times, take median
@@ -628,12 +628,12 @@ def bench_ab_comparison() -> None:
     for _ in range(N_ROUNDS):
         for i, cmd in enumerate(commands):
             t = time.monotonic()
-            sb.run(cmd)
+            box.run(cmd)
             nbx_exec_all[i].append((time.monotonic() - t) * 1000)
     nbx_exec_times = [sorted(nbx_exec_all[i])[N_ROUNDS // 2] for i in range(len(commands))]
 
     t0 = time.monotonic()
-    sb.delete()
+    box.delete()
     nbx_stop = (time.monotonic() - t0) * 1000
 
     # ── Docker (matches Harbor's DockerEnvironment flow) ──
@@ -702,13 +702,13 @@ def bench_concurrent() -> dict:
     results = {}
     for n in [4, 8, 16]:
         def worker(i):
-            sb = Sandbox(
+            box = Sandbox(
                 SandboxConfig(image=IMAGE, working_dir="/workspace"),
                 name=f"nbx-bench-par-{i}",
             )
             for j in range(10):
-                sb.run(f"echo {j}")
-            sb.delete()
+                box.run(f"echo {j}")
+            box.delete()
 
         t0 = time.monotonic()
         with ThreadPoolExecutor(max_workers=n) as pool:
@@ -932,20 +932,20 @@ def bench_port_map():
     times_no_port = []
     for i in range(N):
         t0 = time.monotonic()
-        sb = Sandbox(SandboxConfig(image=IMAGE, working_dir="/"), name=f"bench-noport-{i}")
+        box = Sandbox(SandboxConfig(image=IMAGE, working_dir="/"), name=f"bench-noport-{i}")
         times_no_port.append((time.monotonic() - t0) * 1000)
-        sb.delete()
+        box.delete()
 
     # With port_map (pasta networking, parallelized)
     times_port = []
     for i in range(N):
         t0 = time.monotonic()
-        sb = Sandbox(SandboxConfig(
+        box = Sandbox(SandboxConfig(
             image=IMAGE, working_dir="/",
             net_isolate=True, port_map=[f"{19800+i}:8000"],
         ), name=f"bench-port-{i}")
         times_port.append((time.monotonic() - t0) * 1000)
-        sb.delete()
+        box.delete()
 
     avg_no = sum(times_no_port) / len(times_no_port)
     avg_port = sum(times_port) / len(times_port)

@@ -12,8 +12,8 @@ Usage::
     from nitrobox import Sandbox, SandboxConfig
     from nitrobox.vm import QemuVM
 
-    sb = Sandbox(SandboxConfig(image="ubuntu:22.04", devices=["/dev/kvm"]))
-    vm = QemuVM(sb, disk="/path/to/vm.qcow2", memory="4G")
+    box = Sandbox(SandboxConfig(image="ubuntu:22.04", devices=["/dev/kvm"]))
+    vm = QemuVM(box, disk="/path/to/vm.qcow2", memory="4G")
     vm.start()
     vm.wait_guest_ready()       # wait for guest OS + qemu-ga
     vm.savevm("ready")
@@ -24,7 +24,7 @@ Usage::
     # ... agent actions ...
 
     vm.stop()
-    sb.delete()
+    box.delete()
 """
 
 from __future__ import annotations
@@ -78,12 +78,12 @@ class QemuVM:
 
     Example::
 
-        sb = Sandbox(SandboxConfig(
+        box = Sandbox(SandboxConfig(
             image="ubuntu:22.04",
             devices=["/dev/kvm"],
             volumes=["/host/vms:/vms:rw"],
         ))
-        vm = QemuVM(sb, disk="/vms/osworld.qcow2", memory="4G", cpus=4)
+        vm = QemuVM(box, disk="/vms/osworld.qcow2", memory="4G", cpus=4)
         vm.start()
         vm.wait_guest_ready()   # wait for qemu-ga
         vm.savevm("ready")
@@ -94,7 +94,7 @@ class QemuVM:
             # ... agent loop ...
 
         vm.stop()
-        sb.delete()
+        box.delete()
     """
 
     def __init__(
@@ -146,7 +146,7 @@ class QemuVM:
             # in Apple SMC key) break when double-shell-wrapped.  Write
             # to a script file to avoid quoting issues.
             #
-            # Use sb.run() to write the script — write_file() goes to the
+            # Use box.run() to write the script — write_file() goes to the
             # overlayfs upper layer which is hidden by bind mounts, so
             # scripts on volume paths would be invisible to the shell.
             script_path = str(Path(self._qmp_path).parent / ".nbx_qemu_launch.sh")

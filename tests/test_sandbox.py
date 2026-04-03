@@ -42,9 +42,9 @@ def sandbox(tmp_path, shared_cache_dir):
         env_base_dir=str(tmp_path / "envs"),
         rootfs_cache_dir=shared_cache_dir,
     )
-    sb = Sandbox(config, name="test")
-    yield sb
-    sb.delete()
+    box = Sandbox(config, name="test")
+    yield box
+    box.delete()
 
 
 # ------------------------------------------------------------------ #
@@ -61,9 +61,9 @@ class TestLifecycle:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="lifecycle")
-        assert sb.rootfs.exists()
-        sb.delete()
+        box = Sandbox(config, name="lifecycle")
+        assert box.rootfs.exists()
+        box.delete()
         assert not (tmp_path / "envs" / "lifecycle").exists()
 
     def test_repr(self, sandbox):
@@ -107,11 +107,11 @@ class TestRun:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="env-test")
-        output, ec = sb.run("echo $MY_VAR")
+        box = Sandbox(config, name="env-test")
+        output, ec = box.run("echo $MY_VAR")
         assert ec == 0
         assert "test_value_123" in output
-        sb.delete()
+        box.delete()
 
     def test_timeout(self, sandbox):
         output, ec = sandbox.run("sleep 60", timeout=1)
@@ -240,14 +240,14 @@ class TestReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="dead-dir-test")
+        box = Sandbox(config, name="dead-dir-test")
         env_dir = tmp_path / "envs" / "dead-dir-test"
 
         for _ in range(5):
-            sb.run("seq 1 50 | xargs -I{} touch /workspace/f_{}")
-            sb.reset()
+            box.run("seq 1 50 | xargs -I{} touch /workspace/f_{}")
+            box.reset()
 
-        sb.delete()
+        box.delete()
         assert not env_dir.exists(), "env_dir not cleaned up by delete()"
 
 
@@ -269,9 +269,9 @@ class TestConcurrency:
                 env_base_dir=str(tmp_path / "envs"),
                 rootfs_cache_dir=shared_cache_dir,
             )
-            sb = Sandbox(config, name=f"parallel-{i}")
-            output, ec = sb.run(f"echo worker-{i}")
-            sb.delete()
+            box = Sandbox(config, name=f"parallel-{i}")
+            output, ec = box.run(f"echo worker-{i}")
+            box.delete()
             return output.strip(), ec
 
         with ThreadPoolExecutor(max_workers=n) as pool:
@@ -328,9 +328,9 @@ def tty_sandbox(tmp_path, shared_cache_dir):
         env_base_dir=str(tmp_path / "envs"),
         rootfs_cache_dir=shared_cache_dir,
     )
-    sb = Sandbox(config, name="tty-test")
-    yield sb
-    sb.delete()
+    box = Sandbox(config, name="tty-test")
+    yield box
+    box.delete()
 
 
 class TestPTY:
@@ -437,12 +437,12 @@ class TestNetIsolate:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="net-test")
-        output, ec = sb.run("ip link show 2>/dev/null || cat /proc/net/dev")
+        box = Sandbox(config, name="net-test")
+        output, ec = box.run("ip link show 2>/dev/null || cat /proc/net/dev")
         assert ec == 0
         # Should NOT have eth0 or any real interface
         assert "eth0" not in output
-        sb.delete()
+        box.delete()
 
     def test_no_net_isolate_default(self, sandbox):
         """Default sandbox should see host interfaces."""
@@ -551,17 +551,17 @@ class TestVolumes:
             rootfs_cache_dir=shared_cache_dir,
             volumes=[f"{host_dir}:/mnt/data:ro"],
         )
-        sb = Sandbox(config, name="vol-ro")
+        box = Sandbox(config, name="vol-ro")
         try:
-            output, ec = sb.run("cat /mnt/data/file.txt")
+            output, ec = box.run("cat /mnt/data/file.txt")
             assert ec == 0
             assert "host_content" in output
 
             # Write should fail
-            _, ec = sb.run("touch /mnt/data/new_file 2>&1")
+            _, ec = box.run("touch /mnt/data/new_file 2>&1")
             assert ec != 0
         finally:
-            sb.delete()
+            box.delete()
 
     def test_rw_volume(self, tmp_path, shared_cache_dir):
         _requires_root()
@@ -576,12 +576,12 @@ class TestVolumes:
             rootfs_cache_dir=shared_cache_dir,
             volumes=[f"{host_dir}:/mnt/data:rw"],
         )
-        sb = Sandbox(config, name="vol-rw")
+        box = Sandbox(config, name="vol-rw")
         try:
-            sb.run("echo written_from_sandbox > /mnt/data/output.txt")
+            box.run("echo written_from_sandbox > /mnt/data/output.txt")
             assert (host_dir / "output.txt").read_text().strip() == "written_from_sandbox"
         finally:
-            sb.delete()
+            box.delete()
 
 
 # ------------------------------------------------------------------ #
@@ -606,15 +606,15 @@ class TestObservability:
             rootfs_cache_dir=shared_cache_dir,
             cpu_max="50000 100000",
         )
-        sb = Sandbox(config, name="psi-test")
+        box = Sandbox(config, name="psi-test")
         try:
-            psi = sb.pressure()
+            psi = box.pressure()
             assert isinstance(psi, dict)
             if psi:  # cgroup v2 available
                 assert "cpu" in psi
                 assert "avg10" in psi["cpu"]
         finally:
-            sb.delete()
+            box.delete()
 
     def test_reclaim_memory(self, sandbox):
         sandbox.run("echo hello")
@@ -741,14 +741,14 @@ class TestResourceLimits:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="mem-limit")
+        box = Sandbox(config, name="mem-limit")
         # Try to allocate 100 MB -- should fail or be killed
-        _, ec = sb.run(
+        _, ec = box.run(
             "python3 -c 'x = bytearray(100*1024*1024)' 2>&1",
             timeout=10,
         )
         assert ec != 0
-        sb.delete()
+        box.delete()
 
     def test_pids_limit_enforced(self, tmp_path, shared_cache_dir):
         """pids_max should be correctly written to the cgroup."""
@@ -764,17 +764,17 @@ class TestResourceLimits:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="pid-limit")
+        box = Sandbox(config, name="pid-limit")
         # Verify cgroup pids.max is set correctly from the host side
-        cgroup_path = sb._cgroup_path
+        cgroup_path = box._cgroup_path
         assert cgroup_path is not None, "cgroup was not created"
         pids_max_value = (cgroup_path / "pids.max").read_text().strip()
         assert pids_max_value == "42", f"Expected pids.max=42, got {pids_max_value}"
         # Verify sandbox is still functional
-        output, ec = sb.run("echo pids-ok")
+        output, ec = box.run("echo pids-ok")
         assert ec == 0
         assert "pids-ok" in output
-        sb.delete()
+        box.delete()
 
     def test_cpu_max_accepted(self, tmp_path, shared_cache_dir):
         """cpu_max config should not cause errors during sandbox creation."""
@@ -790,11 +790,11 @@ class TestResourceLimits:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="cpu-limit")
-        output, ec = sb.run("echo cpu-ok")
+        box = Sandbox(config, name="cpu-limit")
+        output, ec = box.run("echo cpu-ok")
         assert ec == 0
         assert "cpu-ok" in output
-        sb.delete()
+        box.delete()
 
 
 # ------------------------------------------------------------------ #
@@ -847,12 +847,12 @@ class TestEdgeCases:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="dead-sandbox")
-        sb.delete()
+        box = Sandbox(config, name="dead-sandbox")
+        box.delete()
         # rootfs is gone, so run() should raise (shell can't restart)
         from nitrobox._errors import SandboxError
         with pytest.raises((RuntimeError, OSError, SandboxError)):
-            sb.run("echo hello")
+            box.run("echo hello")
 
     def test_concurrent_commands_on_same_sandbox(self, sandbox):
         """Multiple threads issuing commands to one sandbox should serialize."""
@@ -968,9 +968,9 @@ class TestPortMap:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="port-test")
+        box = Sandbox(config, name="port-test")
         try:
-            sb.run_background("python3 -m http.server 8000 --directory /tmp")
+            box.run_background("python3 -m http.server 8000 --directory /tmp")
 
             # Poll until server is ready (instead of fixed sleep)
             # Use 127.0.0.1: pasta accepts IPv6 connections but can't
@@ -986,7 +986,7 @@ class TestPortMap:
                 raise AssertionError("server did not start")
             assert resp.status == 200
         finally:
-            sb.delete()
+            box.delete()
 
     def test_internal_loopback(self, tmp_path, shared_cache_dir):
         """Loopback is automatically brought up inside net-isolated sandbox."""
@@ -1003,11 +1003,11 @@ class TestPortMap:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="lo-test")
+        box = Sandbox(config, name="lo-test")
         try:
-            sb.run_background("python3 -m http.server 8000 --directory /tmp")
+            box.run_background("python3 -m http.server 8000 --directory /tmp")
 
-            sb.write_file("/tmp/lo_check.py",
+            box.write_file("/tmp/lo_check.py",
                 "import urllib.request, time\n"
                 "for _ in range(20):\n"
                 "    try:\n"
@@ -1016,11 +1016,11 @@ class TestPortMap:
                 "    except Exception: time.sleep(0.3)\n"
                 "else: print('FAIL')\n"
             )
-            output, ec = sb.run("python3 /tmp/lo_check.py")
+            output, ec = box.run("python3 /tmp/lo_check.py")
             assert ec == 0
             assert "200" in output
         finally:
-            sb.delete()
+            box.delete()
 
     def test_delete_cleans_netns_rootful(self, tmp_path, shared_cache_dir):
         """delete() with port_map leaves no stale netns bind mounts (rootful)."""
@@ -1035,9 +1035,9 @@ class TestPortMap:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="netns-cleanup")
-        env_dir = sb._env_dir
-        sb.delete()
+        box = Sandbox(config, name="netns-cleanup")
+        env_dir = box._env_dir
+        box.delete()
 
         # env_dir should be gone
         assert not env_dir.exists(), f"env_dir not cleaned: {list(env_dir.iterdir()) if env_dir.exists() else 'N/A'}"
@@ -1059,9 +1059,9 @@ class TestPortMap:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="netns-cleanup-u")
-        env_dir = sb._env_dir
-        sb.delete()
+        box = Sandbox(config, name="netns-cleanup-u")
+        env_dir = box._env_dir
+        box.delete()
 
         # env_dir should be gone (no stuck .netns bind mount)
         assert not env_dir.exists(), f"env_dir not cleaned: {list(env_dir.iterdir()) if env_dir.exists() else 'N/A'}"
@@ -1086,12 +1086,12 @@ class TestCleanupVerification:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="clean-test")
+        box = Sandbox(config, name="clean-test")
         # Create some files inside sandbox
-        sb.run("echo test > /workspace/file.txt")
-        sb.run("mkdir -p /workspace/subdir && echo nested > /workspace/subdir/a.txt")
-        env_dir = sb._env_dir
-        sb.delete()
+        box.run("echo test > /workspace/file.txt")
+        box.run("mkdir -p /workspace/subdir && echo nested > /workspace/subdir/a.txt")
+        env_dir = box._env_dir
+        box.delete()
 
         assert not env_dir.exists(), \
             f"env_dir still exists after delete: {list(env_dir.rglob('*')) if env_dir.exists() else []}"
@@ -1106,11 +1106,11 @@ class TestCleanupVerification:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="proc-clean")
-        shell_pid = sb._persistent_shell.pid
+        box = Sandbox(config, name="proc-clean")
+        shell_pid = box._persistent_shell.pid
         assert shell_pid is not None
 
-        sb.delete()
+        box.delete()
 
         # Process should be dead
         import signal
@@ -1128,18 +1128,18 @@ class TestCleanupVerification:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="mount-leak")
+        box = Sandbox(config, name="mount-leak")
         try:
             import subprocess
             before = subprocess.run(["mount"], capture_output=True, text=True).stdout.count("mount-leak")
             for _ in range(5):
-                sb.reset()
+                box.reset()
             after = subprocess.run(["mount"], capture_output=True, text=True).stdout.count("mount-leak")
             # Mount count should not grow with resets
             assert after <= before + 2, \
                 f"Mount leak: {before} mounts before, {after} after 5 resets"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_delete_no_stale_cgroup(self, tmp_path, shared_cache_dir):
         """delete() removes the cgroup directory."""
@@ -1152,9 +1152,9 @@ class TestCleanupVerification:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="cg-clean")
-        cgroup_path = sb._cgroup_path
-        sb.delete()
+        box = Sandbox(config, name="cg-clean")
+        cgroup_path = box._cgroup_path
+        box.delete()
 
         if cgroup_path:
             assert not cgroup_path.exists(), f"cgroup not cleaned: {cgroup_path}"
@@ -1181,9 +1181,9 @@ class TestLayerCache:
                 env_base_dir=str(tmp_path / "envs"),
                 rootfs_cache_dir=str(cache_dir),
             )
-            sb = Sandbox(config, name=f"layer-test-{i}")
+            box = Sandbox(config, name=f"layer-test-{i}")
             configs.append(config)
-            sandboxes.append(sb)
+            sandboxes.append(box)
 
         try:
             layers0 = set(l.name for l in (sandboxes[0]._layer_dirs or []))
@@ -1197,8 +1197,8 @@ class TestLayerCache:
             assert "3.11" in out0
             assert "3.12" in out1
         finally:
-            for sb in sandboxes:
-                sb.delete()
+            for box in sandboxes:
+                box.delete()
 
     def test_multi_layer_image(self, tmp_path, shared_cache_dir):
         """An image with many layers mounts and works correctly."""
@@ -1211,22 +1211,22 @@ class TestLayerCache:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="multi-layer")
+        box = Sandbox(config, name="multi-layer")
         try:
-            assert sb._layer_dirs is not None
-            assert len(sb._layer_dirs) >= 4
+            assert box._layer_dirs is not None
+            assert len(box._layer_dirs) >= 4
 
-            output, ec = sb.run("python3 -c 'print(1+1)'")
+            output, ec = box.run("python3 -c 'print(1+1)'")
             assert ec == 0
             assert "2" in output
 
             # Reset should work with multi-layer
-            sb.run("touch /tmp/marker")
-            sb.reset()
-            output, ec = sb.run("test -f /tmp/marker && echo yes || echo no")
+            box.run("touch /tmp/marker")
+            box.reset()
+            output, ec = box.run("test -f /tmp/marker && echo yes || echo no")
             assert "no" in output
         finally:
-            sb.delete()
+            box.delete()
 
 
 # ------------------------------------------------------------------ #
@@ -1246,10 +1246,10 @@ class TestClone3Fallback:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="clone3-test")
+        box = Sandbox(config, name="clone3-test")
         try:
             # Python threading uses clone/clone3 under the hood
-            output, ec = sb.run(
+            output, ec = box.run(
                 "python3 -c '"
                 "import threading; "
                 "r = []; "
@@ -1260,7 +1260,7 @@ class TestClone3Fallback:
             assert ec == 0
             assert "42" in output
         finally:
-            sb.delete()
+            box.delete()
 
 
 # ------------------------------------------------------------------ #
@@ -1291,13 +1291,13 @@ class TestHostname:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="hostname-test")
+        box = Sandbox(config, name="hostname-test")
         try:
-            output, ec = sb.run("hostname")
+            output, ec = box.run("hostname")
             assert ec == 0
             assert "my-sandbox" in output.strip()
         finally:
-            sb.delete()
+            box.delete()
 
 
 class TestDnsReset:
@@ -1313,15 +1313,15 @@ class TestDnsReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="dns-reset-test")
+        box = Sandbox(config, name="dns-reset-test")
         try:
-            sb.reset()
-            output, ec = sb.run("cat /etc/resolv.conf")
+            box.reset()
+            output, ec = box.run("cat /etc/resolv.conf")
             assert ec == 0
             assert "8.8.8.8" in output, "dns config lost after reset"
             assert "1.1.1.1" in output
         finally:
-            sb.delete()
+            box.delete()
 
 
 # ------------------------------------------------------------------ #
@@ -1341,16 +1341,16 @@ class TestReadOnly:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="ro-test")
+        box = Sandbox(config, name="ro-test")
         try:
             # Writes to rootfs should fail
-            _, ec = sb.run("touch /test_file 2>/dev/null")
+            _, ec = box.run("touch /test_file 2>/dev/null")
             assert ec != 0
             # Reads should work
-            output, ec = sb.run("cat /etc/hostname 2>/dev/null || echo ok")
+            output, ec = box.run("cat /etc/hostname 2>/dev/null || echo ok")
             assert ec == 0
         finally:
-            sb.delete()
+            box.delete()
 
     def test_read_only_survives_reset(self, tmp_path, shared_cache_dir):
         """read_only is preserved after reset()."""
@@ -1363,15 +1363,15 @@ class TestReadOnly:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="ro-reset")
+        box = Sandbox(config, name="ro-reset")
         try:
-            _, ec = sb.run("touch /test_file 2>/dev/null")
+            _, ec = box.run("touch /test_file 2>/dev/null")
             assert ec != 0
-            sb.reset()
-            _, ec = sb.run("touch /test_file 2>/dev/null")
+            box.reset()
+            _, ec = box.run("touch /test_file 2>/dev/null")
             assert ec != 0
         finally:
-            sb.delete()
+            box.delete()
 
     def test_read_only_without_seccomp(self, tmp_path, shared_cache_dir):
         """read_only works even when seccomp is disabled."""
@@ -1385,12 +1385,12 @@ class TestReadOnly:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="ro-nosec")
+        box = Sandbox(config, name="ro-nosec")
         try:
-            _, ec = sb.run("touch /test_file 2>/dev/null")
+            _, ec = box.run("touch /test_file 2>/dev/null")
             assert ec != 0
         finally:
-            sb.delete()
+            box.delete()
 
 
 # ------------------------------------------------------------------ #
@@ -1889,11 +1889,11 @@ class TestDeleteCleansBackground:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="bg-cleanup")
-        sb.run_background("sleep 3600")
-        sb.run_background("sleep 3600")
+        box = Sandbox(config, name="bg-cleanup")
+        box.run_background("sleep 3600")
+        box.run_background("sleep 3600")
         # delete should not leave mount points behind
-        sb.delete()
+        box.delete()
         rootfs = tmp_path / "envs" / "bg-cleanup" / "rootfs"
         assert not rootfs.exists() or not os.path.ismount(str(rootfs))
 
@@ -2084,13 +2084,13 @@ class TestAsyncAPI:
                 env_base_dir=str(tmp_path / "envs"),
                 rootfs_cache_dir=shared_cache_dir,
             )
-            sb = Sandbox(config, name=f"async-{i}")
+            box = Sandbox(config, name=f"async-{i}")
             try:
-                out, ec = await sb.arun(f"echo worker-{i}")
+                out, ec = await box.arun(f"echo worker-{i}")
                 assert ec == 0
                 assert f"worker-{i}" in out
             finally:
-                await sb.adelete()
+                await box.adelete()
 
         async def main():
             await asyncio.gather(*(worker(i) for i in range(4)))
@@ -2109,13 +2109,13 @@ class TestVmMode:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="vm-sys")
+        box = Sandbox(config, name="vm-sys")
         try:
-            out, ec = sb.run("ls /sys/kernel 2>&1")
+            out, ec = box.run("ls /sys/kernel 2>&1")
             assert ec == 0
             assert out.strip(), "/sys/kernel should have contents"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_tmp_writable(self, tmp_path, shared_cache_dir):
         """vm_mode /tmp is writable (stays on overlayfs to preserve image files)."""
@@ -2125,13 +2125,13 @@ class TestVmMode:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="vm-tmp")
+        box = Sandbox(config, name="vm-tmp")
         try:
-            out, ec = sb.run("touch /tmp/test_file && echo ok")
+            out, ec = box.run("touch /tmp/test_file && echo ok")
             assert ec == 0
             assert "ok" in out
         finally:
-            sb.delete()
+            box.delete()
 
     def test_run_is_tmpfs(self, tmp_path, shared_cache_dir):
         """vm_mode mounts tmpfs at /run."""
@@ -2141,13 +2141,13 @@ class TestVmMode:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="vm-run")
+        box = Sandbox(config, name="vm-run")
         try:
-            out, ec = sb.run("stat -f -c %T /run 2>/dev/null || stat -f /run 2>/dev/null")
+            out, ec = box.run("stat -f -c %T /run 2>/dev/null || stat -f /run 2>/dev/null")
             assert ec == 0
             assert "tmpfs" in out.lower(), f"/run should be tmpfs, got: {out}"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_mktemp_works(self, tmp_path, shared_cache_dir):
         """vm_mode sandbox can create temp files (no overlayfs inode overflow)."""
@@ -2157,13 +2157,13 @@ class TestVmMode:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="vm-mktemp")
+        box = Sandbox(config, name="vm-mktemp")
         try:
-            out, ec = sb.run("mktemp")
+            out, ec = box.run("mktemp")
             assert ec == 0
             assert "/tmp/" in out
         finally:
-            sb.delete()
+            box.delete()
 
     def test_volumes_on_top_of_tmpfs(self, tmp_path, shared_cache_dir):
         """Directory volume bind-mounts work on top of tmpfs /run."""
@@ -2178,13 +2178,13 @@ class TestVmMode:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="vm-vol-run")
+        box = Sandbox(config, name="vm-vol-run")
         try:
-            out, ec = sb.run("cat /run/scripts/test.sh")
+            out, ec = box.run("cat /run/scripts/test.sh")
             assert ec == 0
             assert "echo hello" in out
         finally:
-            sb.delete()
+            box.delete()
 
     def test_proc_sys_not_readonly(self, tmp_path, shared_cache_dir):
         """vm_mode does not make /proc/sys read-only."""
@@ -2194,13 +2194,13 @@ class TestVmMode:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="vm-procsys")
+        box = Sandbox(config, name="vm-procsys")
         try:
             # In vm_mode, /proc/sys should NOT have a read-only bind mount
-            out, ec = sb.run("mount 2>/dev/null | grep 'proc/sys.*\\bro\\b' | wc -l")
+            out, ec = box.run("mount 2>/dev/null | grep 'proc/sys.*\\bro\\b' | wc -l")
             assert ec == 0
             count = int(out.strip())
             assert count == 0, f"/proc/sys should not be read-only in vm_mode, found {count} ro mounts"
         finally:
-            sb.delete()
+            box.delete()
 

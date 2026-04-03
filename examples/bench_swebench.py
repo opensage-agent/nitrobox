@@ -81,22 +81,22 @@ def bench_nbx_swebench(n_episodes: int) -> dict:
 
     # First create
     t0 = time.monotonic()
-    sb = Sandbox(config, name="nbx-bench-swebench")
+    box = Sandbox(config, name="nbx-bench-swebench")
     create_times.append((time.monotonic() - t0) * 1000)
 
     for ep in range(n_episodes):
         # Exec (simulate patch + eval)
         for i in range(N_CMDS_PER_EPISODE):
             t0 = time.monotonic()
-            sb.run(f"echo step-{i}")
+            box.run(f"echo step-{i}")
             exec_times.append((time.monotonic() - t0) * 1000)
 
         # Reset — O(1) overlayfs rename, no recreate
         t0 = time.monotonic()
-        sb.reset()
+        box.reset()
         reset_times.append((time.monotonic() - t0) * 1000)
 
-    sb.delete()
+    box.delete()
 
     return {
         "create_ms": sum(create_times) / len(create_times),

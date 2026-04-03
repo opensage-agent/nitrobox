@@ -71,9 +71,9 @@ def cmd_ps(args: argparse.Namespace) -> None:
         return
     print(f"{'NAME':<30} {'PID':>7} {'STATUS':<8} {'PATH'}")
     print("-" * 80)
-    for sb in sandboxes:
-        status = "running" if sb["alive"] else "dead"
-        print(f"{sb['name']:<30} {sb['pid']:>7} {status:<8} {sb['path']}")
+    for box in sandboxes:
+        status = "running" if box["alive"] else "dead"
+        print(f"{box['name']:<30} {box['pid']:>7} {status:<8} {box['path']}")
     alive = sum(1 for s in sandboxes if s["alive"])
     dead = sum(1 for s in sandboxes if not s["alive"])
     print(f"\n{alive} running, {dead} stale")
@@ -104,20 +104,20 @@ def cmd_kill(args: argparse.Namespace) -> None:
         sys.exit(1)
 
     pids_to_wait: list[int] = []
-    for sb in targets:
-        if not sb["alive"]:
-            print(f"{sb['name']}: already dead")
-            pids_to_wait.append(sb["pid"])
+    for box in targets:
+        if not box["alive"]:
+            print(f"{box['name']}: already dead")
+            pids_to_wait.append(box["pid"])
             continue
         try:
-            os.kill(sb["pid"], signal.SIGTERM)
-            print(f"{sb['name']}: killed (pid {sb['pid']})")
-            pids_to_wait.append(sb["pid"])
+            os.kill(box["pid"], signal.SIGTERM)
+            print(f"{box['name']}: killed (pid {box['pid']})")
+            pids_to_wait.append(box["pid"])
         except ProcessLookupError:
-            print(f"{sb['name']}: already dead")
-            pids_to_wait.append(sb["pid"])
+            print(f"{box['name']}: already dead")
+            pids_to_wait.append(box["pid"])
         except PermissionError:
-            print(f"{sb['name']}: permission denied (pid {sb['pid']})", file=sys.stderr)
+            print(f"{box['name']}: permission denied (pid {box['pid']})", file=sys.stderr)
 
     if not pids_to_wait:
         return

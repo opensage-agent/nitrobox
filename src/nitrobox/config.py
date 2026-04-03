@@ -363,7 +363,7 @@ class SandboxConfig:
             # After (nitrobox):
             cfg = SandboxConfig.from_docker("python:3.11", cpus=0.5,
                 mem_limit="512m", ports={"80/tcp": 8080})
-            sb = Sandbox(cfg)
+            box = Sandbox(cfg)
         """
         cfg_kwargs: dict[str, Any] = {"image": image}
 
@@ -527,7 +527,7 @@ class SandboxConfig:
                 "docker run --cpus=0.5 -m 512m -v /data:/data:ro "
                 "-p 8080:80 --hostname worker python:3.11"
             )
-            sb = Sandbox(cfg)
+            box = Sandbox(cfg)
         """
         args = shlex.split(cmd)
         # Strip leading "docker" and "run"

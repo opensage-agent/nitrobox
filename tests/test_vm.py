@@ -60,12 +60,12 @@ def vm_sandbox(tmp_path_factory, shared_cache_dir):
         env_base_dir=str(tmp / "envs"),
         rootfs_cache_dir=shared_cache_dir,
     )
-    sb = Sandbox(config, name="vm-test")
+    box = Sandbox(config, name="vm-test")
 
     # Install QEMU if not available
-    out, ec = sb.run("which qemu-system-x86_64 2>/dev/null || echo notfound")
+    out, ec = box.run("which qemu-system-x86_64 2>/dev/null || echo notfound")
     if "notfound" in out:
-        _, ec = sb.run(
+        _, ec = box.run(
             "apt-get update -qq 2>/dev/null && "
             "DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "
             "--no-install-recommends qemu-system-x86 qemu-utils 2>/dev/null "
@@ -73,12 +73,12 @@ def vm_sandbox(tmp_path_factory, shared_cache_dir):
             timeout=300,
         )
         if ec != 0:
-            sb.delete()
+            box.delete()
             pytest.skip("failed to install qemu-system-x86")
 
-    out, ec = sb.run("qemu-system-x86_64 --version 2>&1 | head -1")
+    out, ec = box.run("qemu-system-x86_64 --version 2>&1 | head -1")
     if ec != 0:
-        sb.delete()
+        box.delete()
         pytest.skip("qemu-system-x86_64 not available in sandbox")
 
     # Create test disk
@@ -87,8 +87,8 @@ def vm_sandbox(tmp_path_factory, shared_cache_dir):
         capture_output=True,
     )
 
-    yield sb, str(vm_dir)
-    sb.delete()
+    yield box, str(vm_dir)
+    box.delete()
     # Verify no leftover socket files on the volume mount.
     leftover = list(vm_dir.glob("*.sock"))
     for sock in leftover:
@@ -107,8 +107,8 @@ class TestQemuVM:
 
     def test_start_stop(self, vm_sandbox):
         """VM starts and stops cleanly."""
-        sb, vm_dir = vm_sandbox
-        vm = QemuVM(sb, disk="/vm/test.qcow2", memory="128M", cpus=1)
+        box, vm_dir = vm_sandbox
+        vm = QemuVM(box, disk="/vm/test.qcow2", memory="128M", cpus=1)
         vm.start(timeout=30)
         assert vm.running
         vm.stop()
@@ -116,8 +116,8 @@ class TestQemuVM:
 
     def test_query_status(self, vm_sandbox):
         """QMP query-status returns running state."""
-        sb, vm_dir = vm_sandbox
-        vm = QemuVM(sb, disk="/vm/test.qcow2", memory="128M", cpus=1)
+        box, vm_dir = vm_sandbox
+        vm = QemuVM(box, disk="/vm/test.qcow2", memory="128M", cpus=1)
         vm.start(timeout=30)
         try:
             resp = vm.qmp("query-status")
@@ -127,8 +127,8 @@ class TestQemuVM:
 
     def test_savevm_loadvm(self, vm_sandbox):
         """savevm/loadvm round-trip works."""
-        sb, vm_dir = vm_sandbox
-        vm = QemuVM(sb, disk="/vm/test.qcow2", memory="128M", cpus=1)
+        box, vm_dir = vm_sandbox
+        vm = QemuVM(box, disk="/vm/test.qcow2", memory="128M", cpus=1)
         vm.start(timeout=30)
         try:
             vm.savevm("test_snap")
@@ -144,8 +144,8 @@ class TestQemuVM:
 
     def test_delvm(self, vm_sandbox):
         """delvm removes a snapshot."""
-        sb, vm_dir = vm_sandbox
-        vm = QemuVM(sb, disk="/vm/test.qcow2", memory="128M", cpus=1)
+        box, vm_dir = vm_sandbox
+        vm = QemuVM(box, disk="/vm/test.qcow2", memory="128M", cpus=1)
         vm.start(timeout=30)
         try:
             vm.savevm("to_delete")
@@ -157,8 +157,8 @@ class TestQemuVM:
 
     def test_multiple_snapshots(self, vm_sandbox):
         """Multiple savevm/loadvm cycles work."""
-        sb, vm_dir = vm_sandbox
-        vm = QemuVM(sb, disk="/vm/test.qcow2", memory="128M", cpus=1)
+        box, vm_dir = vm_sandbox
+        vm = QemuVM(box, disk="/vm/test.qcow2", memory="128M", cpus=1)
         vm.start(timeout=30)
         try:
             vm.savevm("snap_a")
@@ -176,8 +176,8 @@ class TestQemuVM:
 
     def test_hmp_command(self, vm_sandbox):
         """HMP commands work via QMP human-monitor-command."""
-        sb, vm_dir = vm_sandbox
-        vm = QemuVM(sb, disk="/vm/test.qcow2", memory="128M", cpus=1)
+        box, vm_dir = vm_sandbox
+        vm = QemuVM(box, disk="/vm/test.qcow2", memory="128M", cpus=1)
         vm.start(timeout=30)
         try:
             info = vm.hmp("info version")
@@ -187,8 +187,8 @@ class TestQemuVM:
 
     def test_build_cmd(self, vm_sandbox):
         """_build_cmd generates correct QEMU command line."""
-        sb, _ = vm_sandbox
-        vm = QemuVM(sb, disk="/vm/disk.qcow2", memory="4G", cpus=4,
+        box, _ = vm_sandbox
+        vm = QemuVM(box, disk="/vm/disk.qcow2", memory="4G", cpus=4,
                     extra_args=["-vnc", ":0"])
         cmd = vm._build_cmd()
         assert "-enable-kvm" in cmd
@@ -199,9 +199,9 @@ class TestQemuVM:
 
     def test_build_cmd_override(self, vm_sandbox):
         """cmd_override replaces the default QEMU command."""
-        sb, _ = vm_sandbox
+        box, _ = vm_sandbox
         override = "qemu-system-x86_64 -enable-kvm -m 8G -drive file=/my/disk.qcow2"
-        vm = QemuVM(sb, cmd_override=override)
+        vm = QemuVM(box, cmd_override=override)
         cmd = vm._build_cmd()
         # cmd_override used verbatim with -qmp appended
         assert cmd.startswith(override)
@@ -212,23 +212,23 @@ class TestQemuVM:
 
     def test_build_cmd_override_preserves_qmp_socket(self, vm_sandbox):
         """cmd_override + custom qmp_socket works."""
-        sb, _ = vm_sandbox
+        box, _ = vm_sandbox
         override = "qemu-system-x86_64 -m 4G"
-        vm = QemuVM(sb, cmd_override=override, qmp_socket="/storage/.qmp.sock")
+        vm = QemuVM(box, cmd_override=override, qmp_socket="/storage/.qmp.sock")
         cmd = vm._build_cmd()
         assert "-qmp unix:/storage/.qmp.sock,server,nowait" in cmd
 
     def test_cmd_override_start_stop(self, vm_sandbox):
         """cmd_override with QMP socket on volume mount works end-to-end."""
-        sb, vm_dir = vm_sandbox
+        box, vm_dir = vm_sandbox
         override = (
             "qemu-system-x86_64 -enable-kvm -m 128M -smp 1"
             " -drive file=/vm/test.qcow2,format=qcow2,if=virtio"
             " -display none -no-shutdown"
         )
-        # QMP socket on volume mount — exercises the sb.run() write path
+        # QMP socket on volume mount — exercises the box.run() write path
         # for the launch script (not write_file, which fails on volumes).
-        vm = QemuVM(sb, cmd_override=override, qmp_socket="/vm/.qmp_override.sock")
+        vm = QemuVM(box, cmd_override=override, qmp_socket="/vm/.qmp_override.sock")
         vm.start(timeout=30)
         try:
             assert vm.running
@@ -243,8 +243,8 @@ class TestQemuVM:
 
     def test_repr(self, vm_sandbox):
         """repr shows useful info."""
-        sb, _ = vm_sandbox
-        vm = QemuVM(sb, disk="/vm/disk.qcow2", memory="2G", cpus=2)
+        box, _ = vm_sandbox
+        vm = QemuVM(box, disk="/vm/disk.qcow2", memory="2G", cpus=2)
         r = repr(vm)
         assert "disk=" in r
         assert "stopped" in r
@@ -272,7 +272,7 @@ class TestRustQMP:
 
     def test_qmp_via_rust_binding_on_volume(self, vm_sandbox, tmp_path):
         """Rust QMP binding works when QMP socket is on a volume mount."""
-        sb, vm_dir = vm_sandbox
+        box, vm_dir = vm_sandbox
 
         # Place QMP socket on a host-accessible volume path.
         # Sockets on overlayfs are not connectable from the host side.
@@ -282,7 +282,7 @@ class TestRustQMP:
         # but /vm is already a volume mount, so use that path.
         qmp_path = "/vm/.nbx_qmp_test.sock"
 
-        vm = QemuVM(sb, disk="/vm/test.qcow2", memory="128M", cpus=1,
+        vm = QemuVM(box, disk="/vm/test.qcow2", memory="128M", cpus=1,
                     qmp_socket=qmp_path)
         vm.start(timeout=30)
         try:

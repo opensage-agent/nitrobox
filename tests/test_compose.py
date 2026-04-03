@@ -1032,20 +1032,20 @@ class TestComposeProject:
             proj.up()
             assert "app" in proj.services
 
-            sb = proj.services["app"]
-            output, ec = sb.run("echo hello-compose")
+            box = proj.services["app"]
+            output, ec = box.run("echo hello-compose")
             assert ec == 0
             assert "hello-compose" in output
 
             # Write a file, reset should clear it but service command restarts
-            sb.run("echo ephemeral > /tmp/test.txt")
+            box.run("echo ephemeral > /tmp/test.txt")
             proj.reset()
 
             # Service command should have restarted after reset
-            output, ec = sb.run("echo post-reset-ok")
+            output, ec = box.run("echo post-reset-ok")
             assert ec == 0
             assert "post-reset-ok" in output
-            _, ec = sb.run("cat /tmp/test.txt 2>/dev/null")
+            _, ec = box.run("cat /tmp/test.txt 2>/dev/null")
             assert ec != 0  # file gone after reset
         finally:
             proj.down()
@@ -1426,13 +1426,13 @@ class TestComposeProject:
         )
         try:
             proj.up()
-            sb = proj.services["net"]
+            box = proj.services["net"]
 
             # Config should have cap_add
-            assert sb._config.cap_add == ["NET_RAW", "NET_ADMIN"]
+            assert box._config.cap_add == ["NET_RAW", "NET_ADMIN"]
 
             # Runtime: check effective capabilities bitmask
-            output, ec = sb.run("cat /proc/self/status | grep CapEff")
+            output, ec = box.run("cat /proc/self/status | grep CapEff")
             assert ec == 0
             cap_hex = output.strip().split()[-1]
             cap_int = int(cap_hex, 16)
@@ -1464,13 +1464,13 @@ class TestComposeProject:
         )
         try:
             proj.up()
-            sb = proj.services["priv"]
+            box = proj.services["priv"]
 
             # privileged should disable seccomp
-            assert sb._config.seccomp is False
+            assert box._config.seccomp is False
 
             # Should have all capabilities (SYS_ADMIN=21, SYS_PTRACE=19, etc.)
-            output, ec = sb.run("cat /proc/self/status | grep CapEff")
+            output, ec = box.run("cat /proc/self/status | grep CapEff")
             assert ec == 0
             cap_hex = output.strip().split()[-1]
             cap_int = int(cap_hex, 16)
@@ -1858,7 +1858,7 @@ class TestHealthMonitor:
     @staticmethod
     def _mock_sb(results: list[tuple[str, int]]):
         """Create a mock sandbox that returns results in order."""
-        sb = MagicMock()
+        box = MagicMock()
         call_count = 0
 
         def run_side_effect(cmd, timeout=None):
@@ -1869,22 +1869,22 @@ class TestHealthMonitor:
                 return result
             return ("", 0)
 
-        sb.run = MagicMock(side_effect=run_side_effect)
-        return sb
+        box.run = MagicMock(side_effect=run_side_effect)
+        return box
 
     def test_immediate_healthy(self):
         """Monitor sets status to healthy on first successful check."""
-        sb = self._mock_sb([("", 0)])
-        mon = _HealthMonitor(sb, "true", interval=10, timeout=5)
+        box = self._mock_sb([("", 0)])
+        mon = _HealthMonitor(box, "true", interval=10, timeout=5)
         time.sleep(0.5)
         assert mon.status == "healthy"
         mon.stop()
 
     def test_healthy_after_failures(self):
         """Monitor becomes healthy after initial failures."""
-        sb = self._mock_sb([("", 1), ("", 1), ("", 0)])
+        box = self._mock_sb([("", 1), ("", 1), ("", 0)])
         mon = _HealthMonitor(
-            sb, "check", interval=0.1, timeout=5,
+            box, "check", interval=0.1, timeout=5,
             start_period=10, start_interval=0.1,
         )
         time.sleep(1.0)
@@ -1893,9 +1893,9 @@ class TestHealthMonitor:
 
     def test_unhealthy_after_retries(self):
         """Monitor marks unhealthy after retries consecutive failures."""
-        sb = self._mock_sb([("", 1)] * 20)
+        box = self._mock_sb([("", 1)] * 20)
         mon = _HealthMonitor(
-            sb, "check", interval=0.1, timeout=5,
+            box, "check", interval=0.1, timeout=5,
             start_period=0, retries=3,
         )
         time.sleep(1.0)
@@ -1904,9 +1904,9 @@ class TestHealthMonitor:
 
     def test_start_period_suppresses_unhealthy(self):
         """Failures during start_period don't mark unhealthy."""
-        sb = self._mock_sb([("", 1)] * 50)
+        box = self._mock_sb([("", 1)] * 50)
         mon = _HealthMonitor(
-            sb, "check", interval=0.1, timeout=5,
+            box, "check", interval=0.1, timeout=5,
             start_period=2.0, retries=3,
         )
         # During start_period, should stay "starting" not "unhealthy"
@@ -1916,18 +1916,18 @@ class TestHealthMonitor:
 
     def test_stop_terminates_thread(self):
         """stop() should terminate the background thread promptly."""
-        sb = self._mock_sb([("", 1)] * 100)
+        box = self._mock_sb([("", 1)] * 100)
         mon = _HealthMonitor(
-            sb, "check", interval=0.1, timeout=5, start_period=100,
+            box, "check", interval=0.1, timeout=5, start_period=100,
         )
         mon.stop()
         assert not mon._thread.is_alive()
 
     def test_start_interval_used_during_start_period(self):
         """During start_period, checks use start_interval, not interval."""
-        sb = self._mock_sb([("", 1)] * 100)
+        box = self._mock_sb([("", 1)] * 100)
         mon = _HealthMonitor(
-            sb, "check",
+            box, "check",
             interval=60.0,          # very long — would timeout test if used
             start_interval=0.1,     # fast — allows multiple checks
             start_period=5.0,
@@ -1935,7 +1935,7 @@ class TestHealthMonitor:
         )
         time.sleep(1.0)
         # Should have made several calls (using start_interval=0.1s)
-        call_count = sb.run.call_count
+        call_count = box.run.call_count
         assert call_count >= 3, f"expected >=3 calls, got {call_count}"
         mon.stop()
 
@@ -1943,9 +1943,9 @@ class TestHealthMonitor:
         """A successful check resets consecutive failure counter."""
         # Fail twice, succeed once, fail twice more → should NOT be unhealthy
         # because the success reset the counter
-        sb = self._mock_sb([("", 1), ("", 1), ("", 0), ("", 1), ("", 1)])
+        box = self._mock_sb([("", 1), ("", 1), ("", 0), ("", 1), ("", 1)])
         mon = _HealthMonitor(
-            sb, "check", interval=0.1, timeout=5,
+            box, "check", interval=0.1, timeout=5,
             start_period=0, retries=3,
         )
         time.sleep(1.5)
@@ -1954,11 +1954,11 @@ class TestHealthMonitor:
         mon.stop()
 
     def test_exception_counts_as_failure(self):
-        """If sb.run() raises, it should count as a failed check."""
-        sb = MagicMock()
-        sb.run = MagicMock(side_effect=RuntimeError("connection lost"))
+        """If box.run() raises, it should count as a failed check."""
+        box = MagicMock()
+        box.run = MagicMock(side_effect=RuntimeError("connection lost"))
         mon = _HealthMonitor(
-            sb, "check", interval=0.1, timeout=5,
+            box, "check", interval=0.1, timeout=5,
             start_period=0, retries=3,
         )
         time.sleep(1.0)
@@ -2093,29 +2093,29 @@ class TestWriteResolv:
 
     def test_write_resolv_calls_run(self):
         from nitrobox.compose._project import ComposeProject
-        sb = MagicMock()
-        sb.run = MagicMock(return_value=("", 0))
-        ComposeProject._write_resolv(sb, ["169.254.1.1"])
-        sb.run.assert_called_once()
-        call_args = sb.run.call_args[0][0]
+        box = MagicMock()
+        box.run = MagicMock(return_value=("", 0))
+        ComposeProject._write_resolv(box, ["169.254.1.1"])
+        box.run.assert_called_once()
+        call_args = box.run.call_args[0][0]
         assert "169.254.1.1" in call_args
         assert "resolv.conf" in call_args
 
     def test_write_resolv_multiple_nameservers(self):
         from nitrobox.compose._project import ComposeProject
-        sb = MagicMock()
-        sb.run = MagicMock(return_value=("", 0))
-        ComposeProject._write_resolv(sb, ["8.8.8.8", "8.8.4.4"])
-        call_args = sb.run.call_args[0][0]
+        box = MagicMock()
+        box.run = MagicMock(return_value=("", 0))
+        ComposeProject._write_resolv(box, ["8.8.8.8", "8.8.4.4"])
+        call_args = box.run.call_args[0][0]
         assert "8.8.8.8" in call_args
         assert "8.8.4.4" in call_args
 
     def test_write_resolv_exception_swallowed(self):
         from nitrobox.compose._project import ComposeProject
-        sb = MagicMock()
-        sb.run = MagicMock(side_effect=RuntimeError("sandbox dead"))
+        box = MagicMock()
+        box.run = MagicMock(side_effect=RuntimeError("sandbox dead"))
         # Should not raise
-        ComposeProject._write_resolv(sb, ["169.254.1.1"])
+        ComposeProject._write_resolv(box, ["169.254.1.1"])
 
 
 class TestDigestCache:

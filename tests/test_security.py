@@ -47,9 +47,9 @@ def root_sandbox(tmp_path, shared_cache_dir):
         rootfs_cache_dir=shared_cache_dir,
         seccomp=True,
     )
-    sb = Sandbox(config, name="sec-test")
-    yield sb
-    sb.delete()
+    box = Sandbox(config, name="sec-test")
+    yield box
+    box.delete()
 
 
 @pytest.fixture
@@ -64,9 +64,9 @@ def userns_sandbox(tmp_path, shared_cache_dir):
         env_base_dir=str(tmp_path / "envs"),
         rootfs_cache_dir=shared_cache_dir,
     )
-    sb = Sandbox(config, name="userns-test")
-    yield sb
-    sb.delete()
+    box = Sandbox(config, name="userns-test")
+    yield box
+    box.delete()
 
 
 # ------------------------------------------------------------------ #
@@ -153,13 +153,13 @@ class TestEntrypoint:
             entrypoint=["/bin/sh", "-c",
                         "touch /tmp/.ep_ran; exec \"$@\"", "--"],
         )
-        sb = Sandbox(config, name="ep-test")
+        box = Sandbox(config, name="ep-test")
         try:
-            output, ec = sb.run("cat /tmp/.ep_ran 2>&1 && echo OK")
+            output, ec = box.run("cat /tmp/.ep_ran 2>&1 && echo OK")
             assert ec == 0, f"Entrypoint marker missing: {output}"
             assert "OK" in output
         finally:
-            sb.delete()
+            box.delete()
 
     def test_entrypoint_env_setup(self, tmp_path, shared_cache_dir):
         """ENTRYPOINT can set up environment visible to later commands."""
@@ -173,13 +173,13 @@ class TestEntrypoint:
                         "mkdir -p /data && echo ready > /data/status; exec \"$@\"",
                         "--"],
         )
-        sb = Sandbox(config, name="ep-env")
+        box = Sandbox(config, name="ep-env")
         try:
-            output, ec = sb.run("cat /data/status")
+            output, ec = box.run("cat /data/status")
             assert ec == 0
             assert "ready" in output
         finally:
-            sb.delete()
+            box.delete()
 
     def test_entrypoint_survives_reset(self, tmp_path, shared_cache_dir):
         """ENTRYPOINT re-runs after sandbox reset."""
@@ -192,19 +192,19 @@ class TestEntrypoint:
             entrypoint=["/bin/sh", "-c",
                         "touch /tmp/.ep_ran; exec \"$@\"", "--"],
         )
-        sb = Sandbox(config, name="ep-reset")
+        box = Sandbox(config, name="ep-reset")
         try:
             # Verify entrypoint ran
-            _, ec = sb.run("test -f /tmp/.ep_ran")
+            _, ec = box.run("test -f /tmp/.ep_ran")
             assert ec == 0
             # Delete marker and reset
-            sb.run("rm /tmp/.ep_ran")
-            sb.reset()
+            box.run("rm /tmp/.ep_ran")
+            box.reset()
             # After reset, entrypoint should have re-run
-            _, ec = sb.run("test -f /tmp/.ep_ran")
+            _, ec = box.run("test -f /tmp/.ep_ran")
             assert ec == 0, "Entrypoint did not re-run after reset"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_no_entrypoint_works(self, root_sandbox):
         """Sandbox without entrypoint still works normally."""
@@ -237,12 +237,12 @@ class TestEntrypoint:
             entrypoint=["/bin/sh", "-c",
                         "touch /tmp/.ep_rootless; exec \"$@\"", "--"],
         )
-        sb = Sandbox(config, name="ep-rootless")
+        box = Sandbox(config, name="ep-rootless")
         try:
-            _, ec = sb.run("test -f /tmp/.ep_rootless")
+            _, ec = box.run("test -f /tmp/.ep_rootless")
             assert ec == 0, "Entrypoint did not run in rootless mode"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_image_entrypoint_backfill(self, tmp_path, shared_cache_dir):
         """SandboxConfig.entrypoint is auto-filled from OCI image config."""
@@ -264,14 +264,14 @@ class TestEntrypoint:
         assert config.entrypoint is None  # not set yet
 
         with patch("nitrobox.rootfs.get_image_config", return_value=fake_cfg):
-            sb = Sandbox(config, name="ep-auto")
+            box = Sandbox(config, name="ep-auto")
 
         try:
             assert config.entrypoint == fake_cfg["entrypoint"]
-            _, ec = sb.run("test -f /tmp/.ep_auto")
+            _, ec = box.run("test -f /tmp/.ep_auto")
             assert ec == 0, "Auto-filled entrypoint did not run"
         finally:
-            sb.delete()
+            box.delete()
 
 
 # ------------------------------------------------------------------ #
@@ -297,11 +297,11 @@ class TestCleanup:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="stale-test")
+        box = Sandbox(config, name="stale-test")
         env_dir = tmp_path / "envs" / "stale-test"
         assert env_dir.exists()
         # Properly delete — this unmounts and kills the process
-        sb.delete()
+        box.delete()
         # Recreate env dir with .pid pointing to a dead PID to simulate stale
         env_dir.mkdir(parents=True, exist_ok=True)
         (env_dir / ".pid").write_text("999999999")
@@ -434,15 +434,15 @@ class TestUserNamespace:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-multi-layer")
+        box = Sandbox(config, name="userns-multi-layer")
         try:
-            assert sb._layer_dirs is not None
-            assert len(sb._layer_dirs) >= 4
-            output, ec = sb.run("python3 --version")
+            assert box._layer_dirs is not None
+            assert len(box._layer_dirs) >= 4
+            output, ec = box.run("python3 --version")
             assert ec == 0
             assert "3.11" in output
         finally:
-            sb.delete()
+            box.delete()
 
     def test_shared_layers_rootless(self, tmp_path, shared_cache_dir):
         """Two images sharing base layers reuse cached layers in rootless."""
@@ -464,8 +464,8 @@ class TestUserNamespace:
             shared = layers0 & layers1
             assert len(shared) > 0, "python 3.11 and 3.12 should share base layers"
         finally:
-            for sb in sandboxes:
-                sb.delete()
+            for box in sandboxes:
+                box.delete()
 
     def test_read_only_rootfs(self, tmp_path, shared_cache_dir):
         """Read-only rootfs works in userns mode."""
@@ -479,15 +479,15 @@ class TestUserNamespace:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-ro")
+        box = Sandbox(config, name="userns-ro")
         try:
-            _, ec = sb.run("touch /test_ro 2>/dev/null")
+            _, ec = box.run("touch /test_ro 2>/dev/null")
             assert ec != 0, "write should fail on read-only rootfs"
             # /dev/null should still work (mounted on top)
-            _, ec = sb.run("echo x > /dev/null")
+            _, ec = box.run("echo x > /dev/null")
             assert ec == 0
         finally:
-            sb.delete()
+            box.delete()
 
     def test_volume_rw(self, tmp_path, shared_cache_dir):
         """Read-write volume works in userns mode."""
@@ -505,15 +505,15 @@ class TestUserNamespace:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-vol-rw")
+        box = Sandbox(config, name="userns-vol-rw")
         try:
-            output, ec = sb.run("cat /mnt/data/input.txt")
+            output, ec = box.run("cat /mnt/data/input.txt")
             assert ec == 0
             assert "from host" in output
-            sb.run("echo from_sandbox > /mnt/data/output.txt")
+            box.run("echo from_sandbox > /mnt/data/output.txt")
             assert (shared / "output.txt").read_text().strip() == "from_sandbox"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_volume_ro(self, tmp_path, shared_cache_dir):
         """Read-only volume works in userns mode."""
@@ -531,15 +531,15 @@ class TestUserNamespace:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-vol-ro")
+        box = Sandbox(config, name="userns-vol-ro")
         try:
-            output, ec = sb.run("cat /mnt/data/data.txt")
+            output, ec = box.run("cat /mnt/data/data.txt")
             assert ec == 0
             assert "read only" in output
-            _, ec = sb.run("echo x > /mnt/data/data.txt 2>&1")
+            _, ec = box.run("echo x > /mnt/data/data.txt 2>&1")
             assert ec != 0, "write should fail on ro volume"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_hostname(self, tmp_path, shared_cache_dir):
         """Custom hostname works in userns mode."""
@@ -553,13 +553,13 @@ class TestUserNamespace:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-hostname")
+        box = Sandbox(config, name="userns-hostname")
         try:
-            output, ec = sb.run("hostname")
+            output, ec = box.run("hostname")
             assert ec == 0
             assert "userns-box" in output.strip()
         finally:
-            sb.delete()
+            box.delete()
 
     def test_port_map(self, tmp_path, shared_cache_dir):
         """Port mapping works in rootless mode (pasta inside userns)."""
@@ -577,9 +577,9 @@ class TestUserNamespace:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-port")
+        box = Sandbox(config, name="userns-port")
         try:
-            sb.run_background("python3 -m http.server 8000 --directory /tmp")
+            box.run_background("python3 -m http.server 8000 --directory /tmp")
             for _ in range(20):
                 try:
                     r = urllib.request.urlopen("http://localhost:19789/", timeout=1)
@@ -590,7 +590,7 @@ class TestUserNamespace:
                 raise AssertionError("server did not start")
             assert r.status == 200
         finally:
-            sb.delete()
+            box.delete()
 
     def test_net_isolate_no_port_map(self, tmp_path, shared_cache_dir):
         """net_isolate=True without port_map gives loopback-only in rootless."""
@@ -604,15 +604,15 @@ class TestUserNamespace:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-netiso")
+        box = Sandbox(config, name="userns-netiso")
         try:
-            output, ec = sb.run("ls /sys/class/net/ 2>/dev/null || echo lo")
+            output, ec = box.run("ls /sys/class/net/ 2>/dev/null || echo lo")
             assert ec == 0
             # Should only see loopback
             ifaces = output.strip().split()
             assert "lo" in ifaces
         finally:
-            sb.delete()
+            box.delete()
 
     def test_seccomp_active(self, userns_sandbox):
         """Seccomp BPF is active in rootless mode (via Rust init chain)."""
@@ -722,7 +722,7 @@ class TestSharedNetwork:
 
         net = SharedNetwork("cmd-test")
         try:
-            sb = Sandbox(SandboxConfig(
+            box = Sandbox(SandboxConfig(
                 image=TEST_IMAGE,
                 env_base_dir=str(tmp_path / "envs"),
                 rootfs_cache_dir=shared_cache_dir,
@@ -730,21 +730,21 @@ class TestSharedNetwork:
                 net_ns=net.netns_path,
             ), name="cmd-test")
 
-            out, ec = sb.run("echo shared-net-ok")
+            out, ec = box.run("echo shared-net-ok")
             assert ec == 0
             assert "shared-net-ok" in out
 
             # File I/O works
-            sb.write_file("/tmp/test.txt", "hello\n")
-            content = sb.read_file("/tmp/test.txt")
+            box.write_file("/tmp/test.txt", "hello\n")
+            content = box.read_file("/tmp/test.txt")
             assert "hello" in content
 
             # Reset works
-            sb.reset()
-            _, ec = sb.run("cat /tmp/test.txt 2>/dev/null")
+            box.reset()
+            _, ec = box.run("cat /tmp/test.txt 2>/dev/null")
             assert ec != 0
 
-            sb.delete()
+            box.delete()
         finally:
             net.destroy()
 
@@ -804,7 +804,7 @@ class TestFailedCreationCleanup:
 
 
 class TestDeleteCleanup:
-    """Verify sb.delete() leaves nothing behind."""
+    """Verify box.delete() leaves nothing behind."""
 
     def _skip_if_root(self):
         if os.geteuid() == 0:
@@ -813,28 +813,28 @@ class TestDeleteCleanup:
     def test_delete_removes_env_dir(self, shared_cache_dir, tmp_path):
         self._skip_if_root()
         env_dir = tmp_path / "envs"
-        sb = Sandbox(SandboxConfig(
+        box = Sandbox(SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=str(env_dir),
             rootfs_cache_dir=shared_cache_dir,
         ), name="del-clean")
-        sb.run("touch /tmp/test.txt")
+        box.run("touch /tmp/test.txt")
         sandbox_dir = env_dir / "del-clean"
         assert sandbox_dir.exists()
-        sb.delete()
+        box.delete()
         assert not sandbox_dir.exists(), "env_dir should be gone after delete"
 
     def test_delete_after_many_files(self, shared_cache_dir, tmp_path):
         """delete() cleans up even with many files in upper."""
         self._skip_if_root()
         env_dir = tmp_path / "envs"
-        sb = Sandbox(SandboxConfig(
+        box = Sandbox(SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=str(env_dir),
             rootfs_cache_dir=shared_cache_dir,
         ), name="del-many")
-        sb.run("seq 1 200 | xargs -I{} touch /tmp/f_{}")
-        sb.delete()
+        box.run("seq 1 200 | xargs -I{} touch /tmp/f_{}")
+        box.delete()
         assert not (env_dir / "del-many").exists()
 
     def test_delete_with_cow_volume(self, shared_cache_dir, tmp_path):
@@ -844,14 +844,14 @@ class TestDeleteCleanup:
         host_dir.mkdir()
         (host_dir / "base.txt").write_text("hello")
         env_dir = tmp_path / "envs"
-        sb = Sandbox(SandboxConfig(
+        box = Sandbox(SandboxConfig(
             image=TEST_IMAGE,
             volumes=[f"{host_dir}:/data:cow"],
             env_base_dir=str(env_dir),
             rootfs_cache_dir=shared_cache_dir,
         ), name="del-cow")
-        sb.run("echo modified > /data/base.txt")
-        sb.delete()
+        box.run("echo modified > /data/base.txt")
+        box.delete()
         assert not (env_dir / "del-cow").exists()
 
 
@@ -882,19 +882,19 @@ class TestMappedUidCleanup:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="mapped-uid-del")
+        box = Sandbox(config, name="mapped-uid-del")
 
         # Create files as non-root mapped user (e.g. _apt, uid 100)
-        _, ec = sb.run(
+        _, ec = box.run(
             "apt-get update -qq 2>/dev/null | tail -1",
             timeout=120,
         )
         if ec != 0:
-            sb.delete()
+            box.delete()
             pytest.skip("apt-get update failed")
 
         # Verify that mapped-uid files exist in upper dir
-        upper = sb._upper_dir
+        upper = box._upper_dir
         assert upper is not None
         mapped_files = []
         host_uid = os.getuid()
@@ -907,7 +907,7 @@ class TestMappedUidCleanup:
                 pass
         assert mapped_files, "expected mapped-uid files from apt-get"
 
-        sb.delete()
+        box.delete()
         assert not env_dir.exists(), (
             f"env dir not fully cleaned: {list(env_dir.rglob('*'))[:5]}"
         )
@@ -923,25 +923,25 @@ class TestMappedUidCleanup:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="mapped-uid-rst")
+        box = Sandbox(config, name="mapped-uid-rst")
         env_dir = tmp_path / "envs" / "mapped-uid-rst"
 
         # Create mapped-uid files
-        _, ec = sb.run(
+        _, ec = box.run(
             "apt-get update -qq 2>/dev/null | tail -1",
             timeout=120,
         )
         if ec != 0:
-            sb.delete()
+            box.delete()
             pytest.skip("apt-get update failed")
 
         # Reset creates dead dirs from the old upper/work
-        sb.reset()
+        box.reset()
 
         # After reset, old dirs are renamed to *.dead.*
         dead_dirs = list(env_dir.glob("*.dead.*"))
         # Dead dirs exist now, will be cleaned on next reset
-        sb.reset()
+        box.reset()
 
         # After second reset, old dead dirs should be fully cleaned
         remaining_dead = [
@@ -952,7 +952,7 @@ class TestMappedUidCleanup:
         ]
         assert not remaining_dead, f"stale dead dirs remain: {remaining_dead}"
 
-        sb.delete()
+        box.delete()
         assert not env_dir.exists()
 
 
@@ -981,13 +981,13 @@ class TestDevices:
             rootfs_cache_dir=shared_cache_dir,
             devices=["/dev/null"],  # /dev/null exists on all Linux
         )
-        sb = Sandbox(config, name="dev-test")
+        box = Sandbox(config, name="dev-test")
         try:
-            output, ec = sb.run("test -e /dev/null && echo exists")
+            output, ec = box.run("test -e /dev/null && echo exists")
             assert ec == 0
             assert "exists" in output
         finally:
-            sb.delete()
+            box.delete()
 
 
 # ------------------------------------------------------------------ #
@@ -1021,13 +1021,13 @@ class TestHardening:
             rootfs_cache_dir=shared_cache_dir,
             oom_score_adj=500,
         )
-        sb = Sandbox(config, name="oom-test")
+        box = Sandbox(config, name="oom-test")
         try:
-            pid = sb._persistent_shell.pid
+            pid = box._persistent_shell.pid
             score = open(f"/proc/{pid}/oom_score_adj").read().strip()
             assert score == "500"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_cpuset(self, tmp_path, shared_cache_dir):
         _requires_root()
@@ -1039,13 +1039,13 @@ class TestHardening:
             rootfs_cache_dir=shared_cache_dir,
             cpuset_cpus="0",
         )
-        sb = Sandbox(config, name="cpuset-test")
+        box = Sandbox(config, name="cpuset-test")
         try:
-            output, ec = sb.run("echo ok")
+            output, ec = box.run("echo ok")
             assert ec == 0
             assert "ok" in output
         finally:
-            sb.delete()
+            box.delete()
 
 
 def _requires_landlock():
@@ -1073,21 +1073,21 @@ class TestLandlockRootful:
             rootfs_cache_dir=shared_cache_dir,
             writable_paths=["/workspace"],
         )
-        sb = Sandbox(config, name="ll-write")
+        box = Sandbox(config, name="ll-write")
         try:
             # /workspace should be writable
-            output, ec = sb.run("echo ok > /workspace/test.txt && cat /workspace/test.txt")
+            output, ec = box.run("echo ok > /workspace/test.txt && cat /workspace/test.txt")
             assert ec == 0
             assert "ok" in output
             # /root should NOT be writable (not in writable_paths)
-            _, ec = sb.run("touch /root/test.txt 2>/dev/null")
+            _, ec = box.run("touch /root/test.txt 2>/dev/null")
             assert ec != 0, "write to /root should fail with Landlock"
             # /tmp is auto-added as writable
-            output, ec = sb.run("echo tmp_ok > /tmp/test_ll.txt && cat /tmp/test_ll.txt")
+            output, ec = box.run("echo tmp_ok > /tmp/test_ll.txt && cat /tmp/test_ll.txt")
             assert ec == 0
             assert "tmp_ok" in output
         finally:
-            sb.delete()
+            box.delete()
 
     def test_writable_paths_reads_unrestricted(self, tmp_path, shared_cache_dir):
         """When only writable_paths is set, reads should be unrestricted."""
@@ -1101,14 +1101,14 @@ class TestLandlockRootful:
             rootfs_cache_dir=shared_cache_dir,
             writable_paths=["/workspace"],
         )
-        sb = Sandbox(config, name="ll-read-ok")
+        box = Sandbox(config, name="ll-read-ok")
         try:
             # Should be able to read anywhere (reads not restricted)
-            output, ec = sb.run("ls /usr/bin/ | head -1")
+            output, ec = box.run("ls /usr/bin/ | head -1")
             assert ec == 0
             assert output.strip()
         finally:
-            sb.delete()
+            box.delete()
 
     def test_readable_paths(self, tmp_path, shared_cache_dir):
         """Only listed paths should be readable when readable_paths is set."""
@@ -1123,18 +1123,18 @@ class TestLandlockRootful:
             readable_paths=["/workspace", "/usr", "/lib", "/lib64",
                             "/bin", "/sbin", "/etc"],
         )
-        sb = Sandbox(config, name="ll-read")
+        box = Sandbox(config, name="ll-read")
         try:
             # /workspace should be readable
-            sb.run("echo test > /workspace/data.txt")
-            output, ec = sb.run("cat /workspace/data.txt")
+            box.run("echo test > /workspace/data.txt")
+            output, ec = box.run("cat /workspace/data.txt")
             assert ec == 0
             assert "test" in output
             # /var should NOT be readable (not in readable_paths)
-            _, ec = sb.run("ls /var 2>/dev/null")
+            _, ec = box.run("ls /var 2>/dev/null")
             assert ec != 0, "read of /var should fail with Landlock"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_writable_and_readable_paths(self, tmp_path, shared_cache_dir):
         """Both read and write restrictions should work together."""
@@ -1149,23 +1149,23 @@ class TestLandlockRootful:
             writable_paths=["/workspace"],
             readable_paths=["/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc"],
         )
-        sb = Sandbox(config, name="ll-rw")
+        box = Sandbox(config, name="ll-rw")
         try:
             # /workspace writable
-            output, ec = sb.run("echo rw_ok > /workspace/x.txt && cat /workspace/x.txt")
+            output, ec = box.run("echo rw_ok > /workspace/x.txt && cat /workspace/x.txt")
             assert ec == 0
             assert "rw_ok" in output
             # /usr readable
-            output, ec = sb.run("ls /usr/bin/ | head -1")
+            output, ec = box.run("ls /usr/bin/ | head -1")
             assert ec == 0
             # /var not readable
-            _, ec = sb.run("ls /var 2>/dev/null")
+            _, ec = box.run("ls /var 2>/dev/null")
             assert ec != 0
             # /usr not writable
-            _, ec = sb.run("touch /usr/test 2>/dev/null")
+            _, ec = box.run("touch /usr/test 2>/dev/null")
             assert ec != 0
         finally:
-            sb.delete()
+            box.delete()
 
     def test_writable_paths_after_reset(self, tmp_path, shared_cache_dir):
         """Landlock should still be enforced after sandbox reset."""
@@ -1179,21 +1179,21 @@ class TestLandlockRootful:
             rootfs_cache_dir=shared_cache_dir,
             writable_paths=["/workspace"],
         )
-        sb = Sandbox(config, name="ll-reset")
+        box = Sandbox(config, name="ll-reset")
         try:
             # Before reset
-            _, ec = sb.run("touch /root/test 2>/dev/null")
+            _, ec = box.run("touch /root/test 2>/dev/null")
             assert ec != 0
-            sb.reset()
+            box.reset()
             # After reset — Landlock should still be active
-            _, ec = sb.run("touch /root/test 2>/dev/null")
+            _, ec = box.run("touch /root/test 2>/dev/null")
             assert ec != 0, "Landlock should survive reset"
             # /workspace still writable
-            output, ec = sb.run("echo post_reset > /workspace/y.txt && cat /workspace/y.txt")
+            output, ec = box.run("echo post_reset > /workspace/y.txt && cat /workspace/y.txt")
             assert ec == 0
             assert "post_reset" in output
         finally:
-            sb.delete()
+            box.delete()
 
     def test_allowed_ports(self, tmp_path, shared_cache_dir):
         """Only listed TCP ports should be connectable."""
@@ -1210,14 +1210,14 @@ class TestLandlockRootful:
             rootfs_cache_dir=shared_cache_dir,
             allowed_ports=[80, 443],
         )
-        sb = Sandbox(config, name="ll-port")
+        box = Sandbox(config, name="ll-port")
         try:
             # Attempt connection to port 9999 (not allowed) — should fail
             # Use bash /dev/tcp which uses connect(2)
-            _, ec = sb.run("bash -c 'echo > /dev/tcp/127.0.0.1/9999' 2>/dev/null", timeout=3)
+            _, ec = box.run("bash -c 'echo > /dev/tcp/127.0.0.1/9999' 2>/dev/null", timeout=3)
             assert ec != 0, "connect to port 9999 should fail with Landlock"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_no_landlock_params_no_restriction(self, root_sandbox):
         """Without Landlock params, no filesystem restrictions should apply."""
@@ -1239,11 +1239,11 @@ class TestLandlockRootful:
             rootfs_cache_dir=shared_cache_dir,
             writable_paths=["/workspace"],
         )
-        sb = Sandbox(config, name="ll-feat")
+        box = Sandbox(config, name="ll-feat")
         try:
-            assert sb.features.get("landlock") is True
+            assert box.features.get("landlock") is True
         finally:
-            sb.delete()
+            box.delete()
 
     def test_landlock_unavailable_raises(self):
         """Setting Landlock params on unsupported kernel should raise SandboxKernelError."""
@@ -1285,17 +1285,17 @@ class TestLandlockRootless:
             rootfs_cache_dir=shared_cache_dir,
             writable_paths=["/workspace"],
         )
-        sb = Sandbox(config, name="ll-userns-write")
+        box = Sandbox(config, name="ll-userns-write")
         try:
             # /workspace writable
-            output, ec = sb.run("echo ok > /workspace/test.txt && cat /workspace/test.txt")
+            output, ec = box.run("echo ok > /workspace/test.txt && cat /workspace/test.txt")
             assert ec == 0
             assert "ok" in output
             # /root not writable
-            _, ec = sb.run("touch /root/test.txt 2>/dev/null")
+            _, ec = box.run("touch /root/test.txt 2>/dev/null")
             assert ec != 0
         finally:
-            sb.delete()
+            box.delete()
 
     def test_readable_paths_rootless(self, tmp_path, shared_cache_dir):
         """readable_paths should restrict reads in rootless mode."""
@@ -1311,14 +1311,14 @@ class TestLandlockRootless:
             readable_paths=["/workspace", "/usr", "/lib", "/lib64",
                             "/bin", "/sbin", "/etc"],
         )
-        sb = Sandbox(config, name="ll-userns-read")
+        box = Sandbox(config, name="ll-userns-read")
         try:
-            output, ec = sb.run("ls /usr/bin/ | head -1")
+            output, ec = box.run("ls /usr/bin/ | head -1")
             assert ec == 0
-            _, ec = sb.run("ls /var 2>/dev/null")
+            _, ec = box.run("ls /var 2>/dev/null")
             assert ec != 0
         finally:
-            sb.delete()
+            box.delete()
 
     def test_writable_paths_after_reset_rootless(self, tmp_path, shared_cache_dir):
         """Landlock should survive reset in rootless mode."""
@@ -1333,15 +1333,15 @@ class TestLandlockRootless:
             rootfs_cache_dir=shared_cache_dir,
             writable_paths=["/workspace"],
         )
-        sb = Sandbox(config, name="ll-userns-reset")
+        box = Sandbox(config, name="ll-userns-reset")
         try:
-            _, ec = sb.run("touch /root/test 2>/dev/null")
+            _, ec = box.run("touch /root/test 2>/dev/null")
             assert ec != 0
-            sb.reset()
-            _, ec = sb.run("touch /root/test 2>/dev/null")
+            box.reset()
+            _, ec = box.run("touch /root/test 2>/dev/null")
             assert ec != 0, "Landlock should survive reset"
         finally:
-            sb.delete()
+            box.delete()
 
 
 # ------------------------------------------------------------------ #
@@ -1366,17 +1366,17 @@ class TestRenamReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-many-files")
+        box = Sandbox(config, name="userns-many-files")
         try:
-            sb.run("mkdir -p /workspace/src && seq 1 200 | "
+            box.run("mkdir -p /workspace/src && seq 1 200 | "
                    "xargs -I{} sh -c 'echo x > /workspace/src/gen_{}.py'")
-            sb.reset()
-            _, ec = sb.run("ls /workspace/src/ 2>/dev/null")
+            box.reset()
+            _, ec = box.run("ls /workspace/src/ 2>/dev/null")
             assert ec != 0, "directory survived reset"
-            out, ec = sb.run("echo ok")
+            out, ec = box.run("echo ok")
             assert ec == 0 and "ok" in out
         finally:
-            sb.delete()
+            box.delete()
 
     def test_dead_dirs_cleaned_on_next_reset(self, tmp_path, shared_cache_dir):
         """Dead dirs from previous reset are cleaned at the start of next reset."""
@@ -1389,19 +1389,19 @@ class TestRenamReset:
             env_base_dir=env_base,
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-dead-cleanup")
+        box = Sandbox(config, name="userns-dead-cleanup")
         try:
             env_dir = Path(env_base) / "userns-dead-cleanup"
 
             # First reset creates dead dirs
-            sb.run("seq 1 50 | xargs -I{} touch /workspace/f_{}")
-            sb.reset()
+            box.run("seq 1 50 | xargs -I{} touch /workspace/f_{}")
+            box.reset()
             dead_after_first = list(env_dir.glob("*.dead.*"))
             assert len(dead_after_first) > 0, "rename should create dead dirs"
 
             # Second reset should clean previous dead dirs
-            sb.run("echo x > /workspace/test.txt")
-            sb.reset()
+            box.run("echo x > /workspace/test.txt")
+            box.reset()
             dead_after_second = list(env_dir.glob("*.dead.*"))
             # Should have new dead dirs but old ones should be gone
             # At most 1 round of dead dirs (from the second reset)
@@ -1409,7 +1409,7 @@ class TestRenamReset:
                 f"Expected at most 2 dead dirs (upper+work), got {len(dead_after_second)}"
             )
         finally:
-            sb.delete()
+            box.delete()
 
     def test_no_dead_dirs_accumulate(self, tmp_path, shared_cache_dir):
         """Repeated resets should not accumulate dead dirs."""
@@ -1422,13 +1422,13 @@ class TestRenamReset:
             env_base_dir=env_base,
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-no-accumulate")
+        box = Sandbox(config, name="userns-no-accumulate")
         try:
             env_dir = Path(env_base) / "userns-no-accumulate"
 
             for i in range(10):
-                sb.run(f"seq 1 50 | xargs -I{{}} touch /workspace/f_{{}}")
-                sb.reset()
+                box.run(f"seq 1 50 | xargs -I{{}} touch /workspace/f_{{}}")
+                box.reset()
 
             dead_dirs = list(env_dir.glob("*.dead.*"))
             # Should have at most 2 (upper.dead + work.dead from last reset)
@@ -1437,7 +1437,7 @@ class TestRenamReset:
                 f"(expected <= 2 after 10 resets)"
             )
         finally:
-            sb.delete()
+            box.delete()
 
     def test_delete_cleans_all_dead_dirs(self, tmp_path, shared_cache_dir):
         """delete() removes env_dir including any remaining dead dirs."""
@@ -1450,14 +1450,14 @@ class TestRenamReset:
             env_base_dir=env_base,
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-delete-dead")
+        box = Sandbox(config, name="userns-delete-dead")
         env_dir = Path(env_base) / "userns-delete-dead"
 
         for _ in range(5):
-            sb.run("seq 1 50 | xargs -I{} touch /workspace/f_{}")
-            sb.reset()
+            box.run("seq 1 50 | xargs -I{} touch /workspace/f_{}")
+            box.reset()
 
-        sb.delete()
+        box.delete()
         assert not env_dir.exists(), "env_dir should be fully removed"
 
     def test_dev_devices_survive_rename_reset(self, tmp_path, shared_cache_dir):
@@ -1470,17 +1470,17 @@ class TestRenamReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-dev-rename")
+        box = Sandbox(config, name="userns-dev-rename")
         try:
-            sb.run("seq 1 100 | xargs -I{} touch /workspace/f_{}")
-            sb.reset()
+            box.run("seq 1 100 | xargs -I{} touch /workspace/f_{}")
+            box.reset()
             for dev in ("null", "zero", "random", "urandom"):
-                output, ec = sb.run(f"test -c /dev/{dev} && echo ok")
+                output, ec = box.run(f"test -c /dev/{dev} && echo ok")
                 assert ec == 0 and "ok" in output, (
                     f"/dev/{dev} not a char device after rename reset"
                 )
         finally:
-            sb.delete()
+            box.delete()
 
 
 # ------------------------------------------------------------------ #
@@ -1498,53 +1498,53 @@ class TestShmSize:
     def test_shm_default_size(self, shared_cache_dir, tmp_path):
         """Default shm is 256MB tmpfs."""
         self._skip_if_root()
-        sb = Sandbox(SandboxConfig(
+        box = Sandbox(SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         ), name="shm-default")
         try:
-            out, ec = sb.run("df -B1 /dev/shm | tail -1")
+            out, ec = box.run("df -B1 /dev/shm | tail -1")
             assert ec == 0
             # Check that /dev/shm is a tmpfs mount
-            out2, _ = sb.run("mount | grep '/dev/shm'")
+            out2, _ = box.run("mount | grep '/dev/shm'")
             assert "tmpfs" in out2
         finally:
-            sb.delete()
+            box.delete()
 
     def test_shm_custom_size(self, shared_cache_dir, tmp_path):
         """Custom shm_size is respected."""
         self._skip_if_root()
-        sb = Sandbox(SandboxConfig(
+        box = Sandbox(SandboxConfig(
             image=TEST_IMAGE,
             shm_size="256m",
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         ), name="shm-custom")
         try:
-            out, ec = sb.run("df -B1 /dev/shm | tail -1")
+            out, ec = box.run("df -B1 /dev/shm | tail -1")
             assert ec == 0
             # 256MB = 268435456 bytes
             assert "268435456" in out or "262144" in out  # bytes or KB
         finally:
-            sb.delete()
+            box.delete()
 
     def test_shm_survives_reset(self, shared_cache_dir, tmp_path):
         """shm mount persists after reset."""
         self._skip_if_root()
-        sb = Sandbox(SandboxConfig(
+        box = Sandbox(SandboxConfig(
             image=TEST_IMAGE,
             shm_size="128m",
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         ), name="shm-reset")
         try:
-            sb.run("echo test > /dev/shm/file.txt")
-            sb.reset()
-            out, ec = sb.run("mount | grep '/dev/shm'")
+            box.run("echo test > /dev/shm/file.txt")
+            box.reset()
+            out, ec = box.run("mount | grep '/dev/shm'")
             assert "tmpfs" in out
         finally:
-            sb.delete()
+            box.delete()
 
 
 class TestUlimitsIntegration:
@@ -1556,18 +1556,18 @@ class TestUlimitsIntegration:
 
     def test_nofile_limit(self, shared_cache_dir, tmp_path):
         self._skip_if_root()
-        sb = Sandbox(SandboxConfig(
+        box = Sandbox(SandboxConfig(
             image=TEST_IMAGE,
             ulimits={"nofile": (1024, 2048)},
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         ), name="ulimit-test")
         try:
-            out, ec = sb.run("ulimit -n")
+            out, ec = box.run("ulimit -n")
             assert ec == 0
             assert out.strip() == "1024"
         finally:
-            sb.delete()
+            box.delete()
 
 
 class TestTmpfsMounts:
@@ -1579,22 +1579,22 @@ class TestTmpfsMounts:
 
     def test_tmpfs_mount(self, shared_cache_dir, tmp_path):
         self._skip_if_root()
-        sb = Sandbox(SandboxConfig(
+        box = Sandbox(SandboxConfig(
             image=TEST_IMAGE,
             tmpfs=["/run:size=10m"],
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         ), name="tmpfs-test")
         try:
-            out, ec = sb.run("mount | grep '/run'")
+            out, ec = box.run("mount | grep '/run'")
             assert ec == 0
             assert "tmpfs" in out
             # Verify writable
-            out2, ec2 = sb.run("echo ok > /run/test.txt && cat /run/test.txt")
+            out2, ec2 = box.run("echo ok > /run/test.txt && cat /run/test.txt")
             assert ec2 == 0
             assert "ok" in out2
         finally:
-            sb.delete()
+            box.delete()
 
 
 class TestConfigSurvivesReset:
@@ -1614,17 +1614,17 @@ class TestConfigSurvivesReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-seccomp-reset")
+        box = Sandbox(config, name="userns-seccomp-reset")
         try:
-            sb.reset()
-            output, ec = sb.run("cat /proc/self/status | grep Seccomp")
+            box.reset()
+            output, ec = box.run("cat /proc/self/status | grep Seccomp")
             assert ec == 0
             assert "2" in output, "seccomp filter not active after reset"
             # mount should still be blocked
-            _, ec = sb.run("mount -t tmpfs tmpfs /tmp 2>/dev/null")
+            _, ec = box.run("mount -t tmpfs tmpfs /tmp 2>/dev/null")
             assert ec != 0, "mount should be blocked after reset"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_hostname_after_reset(self, tmp_path, shared_cache_dir):
         """Custom hostname should persist after reset."""
@@ -1637,14 +1637,14 @@ class TestConfigSurvivesReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-hostname-reset")
+        box = Sandbox(config, name="userns-hostname-reset")
         try:
-            sb.reset()
-            output, ec = sb.run("hostname")
+            box.reset()
+            output, ec = box.run("hostname")
             assert ec == 0
             assert "persist-host" in output, f"hostname lost after reset: {output.strip()!r}"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_read_only_after_reset(self, tmp_path, shared_cache_dir):
         """read_only rootfs should still be enforced after reset."""
@@ -1657,16 +1657,16 @@ class TestConfigSurvivesReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-ro-reset")
+        box = Sandbox(config, name="userns-ro-reset")
         try:
-            sb.reset()
-            _, ec = sb.run("touch /test_ro 2>/dev/null")
+            box.reset()
+            _, ec = box.run("touch /test_ro 2>/dev/null")
             assert ec != 0, "rootfs should be read-only after reset"
             # /dev/null should still work
-            _, ec = sb.run("echo x > /dev/null")
+            _, ec = box.run("echo x > /dev/null")
             assert ec == 0
         finally:
-            sb.delete()
+            box.delete()
 
     def test_dns_after_reset(self, tmp_path, shared_cache_dir):
         """Custom DNS config should persist after reset."""
@@ -1679,14 +1679,14 @@ class TestConfigSurvivesReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-dns-reset")
+        box = Sandbox(config, name="userns-dns-reset")
         try:
-            sb.reset()
-            output, ec = sb.run("cat /etc/resolv.conf")
+            box.reset()
+            output, ec = box.run("cat /etc/resolv.conf")
             assert ec == 0
             assert "8.8.8.8" in output, "dns config lost after reset"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_rw_volume_after_reset(self, tmp_path, shared_cache_dir):
         """rw volume should still be mounted and writable after reset."""
@@ -1703,18 +1703,18 @@ class TestConfigSurvivesReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-rw-vol-reset")
+        box = Sandbox(config, name="userns-rw-vol-reset")
         try:
-            sb.reset()
+            box.reset()
             # Can read host file
-            output, ec = sb.run("cat /data/host.txt")
+            output, ec = box.run("cat /data/host.txt")
             assert ec == 0
             assert "from_host" in output
             # Can write to volume
-            sb.run("echo after_reset > /data/new.txt")
+            box.run("echo after_reset > /data/new.txt")
             assert (shared / "new.txt").read_text().strip() == "after_reset"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_ro_volume_after_reset(self, tmp_path, shared_cache_dir):
         """ro volume should still be mounted and read-only after reset."""
@@ -1731,16 +1731,16 @@ class TestConfigSurvivesReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-ro-vol-reset")
+        box = Sandbox(config, name="userns-ro-vol-reset")
         try:
-            sb.reset()
-            output, ec = sb.run("cat /data/data.txt")
+            box.reset()
+            output, ec = box.run("cat /data/data.txt")
             assert ec == 0
             assert "read_only_data" in output
-            _, ec = sb.run("echo x > /data/data.txt 2>&1")
+            _, ec = box.run("echo x > /data/data.txt 2>&1")
             assert ec != 0, "ro volume should not be writable after reset"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_net_isolate_after_reset(self, tmp_path, shared_cache_dir):
         """net_isolate should still be enforced after reset."""
@@ -1753,15 +1753,15 @@ class TestConfigSurvivesReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-net-reset")
+        box = Sandbox(config, name="userns-net-reset")
         try:
-            sb.reset()
-            output, ec = sb.run("ls /sys/class/net/ 2>/dev/null || echo lo")
+            box.reset()
+            output, ec = box.run("ls /sys/class/net/ 2>/dev/null || echo lo")
             assert ec == 0
             ifaces = output.strip().split()
             assert "lo" in ifaces
         finally:
-            sb.delete()
+            box.delete()
 
     def test_masked_paths_after_reset(self, tmp_path, shared_cache_dir):
         """Sensitive paths should remain masked after reset."""
@@ -1773,14 +1773,14 @@ class TestConfigSurvivesReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-mask-reset")
+        box = Sandbox(config, name="userns-mask-reset")
         try:
-            sb.reset()
-            output, ec = sb.run("cat /proc/kcore 2>&1 | wc -c")
+            box.reset()
+            output, ec = box.run("cat /proc/kcore 2>&1 | wc -c")
             assert ec == 0
             assert int(output.strip()) == 0, "/proc/kcore should be masked after reset"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_working_dir_after_reset(self, userns_sandbox):
         """Working directory should be correct after reset."""
@@ -1800,14 +1800,14 @@ class TestConfigSurvivesReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-env-reset")
+        box = Sandbox(config, name="userns-env-reset")
         try:
-            sb.reset()
-            output, ec = sb.run("echo $MY_TEST_VAR")
+            box.reset()
+            output, ec = box.run("echo $MY_TEST_VAR")
             assert ec == 0
             assert "hello123" in output, f"env var lost after reset: {output.strip()!r}"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_snapshot_after_reset(self, tmp_path, shared_cache_dir):
         """Snapshots should work across resets."""
@@ -1819,17 +1819,17 @@ class TestConfigSurvivesReset:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-snap-reset")
+        box = Sandbox(config, name="userns-snap-reset")
         try:
-            sb.run("echo v1 > /workspace/data.txt")
-            sb.snapshot("v1")
-            sb.reset()
-            sb.run("echo v2 > /workspace/data.txt")
-            sb.restore("v1")
-            output, _ = sb.run("cat /workspace/data.txt")
+            box.run("echo v1 > /workspace/data.txt")
+            box.snapshot("v1")
+            box.reset()
+            box.run("echo v2 > /workspace/data.txt")
+            box.restore("v1")
+            output, _ = box.run("cat /workspace/data.txt")
             assert output.strip() == "v1"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_background_killed_on_reset(self, userns_sandbox):
         """Background processes should be stopped after reset."""
@@ -1877,16 +1877,16 @@ class TestConfigCombinations:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-ro-vol")
+        box = Sandbox(config, name="userns-ro-vol")
         try:
-            output, ec = sb.run("cat /data/data.txt")
+            output, ec = box.run("cat /data/data.txt")
             assert ec == 0
             assert "vol_data" in output
             # rootfs should be read-only
-            _, ec = sb.run("touch /test_ro 2>/dev/null")
+            _, ec = box.run("touch /test_ro 2>/dev/null")
             assert ec != 0
         finally:
-            sb.delete()
+            box.delete()
 
     def test_read_only_with_rw_volume(self, tmp_path, shared_cache_dir):
         """read_only rootfs + rw volume: rootfs read-only but volume writable."""
@@ -1903,14 +1903,14 @@ class TestConfigCombinations:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-ro-rw-vol")
+        box = Sandbox(config, name="userns-ro-rw-vol")
         try:
-            sb.run("echo written > /data/out.txt")
+            box.run("echo written > /data/out.txt")
             assert (shared / "out.txt").read_text().strip() == "written"
-            _, ec = sb.run("touch /test_ro 2>/dev/null")
+            _, ec = box.run("touch /test_ro 2>/dev/null")
             assert ec != 0
         finally:
-            sb.delete()
+            box.delete()
 
     def test_read_only_with_cow_volume(self, tmp_path, shared_cache_dir):
         """read_only rootfs + cow volume: copy-on-write volume works."""
@@ -1928,16 +1928,16 @@ class TestConfigCombinations:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-ro-cow-vol")
+        box = Sandbox(config, name="userns-ro-cow-vol")
         try:
-            output, ec = sb.run("cat /data/original.txt")
+            output, ec = box.run("cat /data/original.txt")
             assert ec == 0
             assert "original" in output
             # cow writes don't affect host
-            sb.run("echo modified > /data/original.txt")
+            box.run("echo modified > /data/original.txt")
             assert (shared / "original.txt").read_text().strip() == "original"
         finally:
-            sb.delete()
+            box.delete()
 
     def test_cow_volume_reset_reverts(self, tmp_path, shared_cache_dir):
         """cow volume changes should be reverted on reset."""
@@ -1954,20 +1954,20 @@ class TestConfigCombinations:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-cow-reset")
+        box = Sandbox(config, name="userns-cow-reset")
         try:
-            sb.run("echo modified > /data/data.txt")
-            out, _ = sb.run("cat /data/data.txt")
+            box.run("echo modified > /data/data.txt")
+            out, _ = box.run("cat /data/data.txt")
             assert "modified" in out
 
-            sb.reset()
+            box.reset()
 
-            out, _ = sb.run("cat /data/data.txt")
+            out, _ = box.run("cat /data/data.txt")
             assert out.strip() == "original", (
                 f"cow volume should revert on reset, got: {out.strip()!r}"
             )
         finally:
-            sb.delete()
+            box.delete()
 
     def test_full_config_combo(self, tmp_path, shared_cache_dir):
         """All config options together: read_only + volumes + hostname + dns + net_isolate."""
@@ -1988,21 +1988,21 @@ class TestConfigCombinations:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-full-combo")
+        box = Sandbox(config, name="userns-full-combo")
         try:
-            output, ec = sb.run("cat /data/test.txt")
+            output, ec = box.run("cat /data/test.txt")
             assert ec == 0
             assert "combo_data" in output
 
-            output, ec = sb.run("hostname")
+            output, ec = box.run("hostname")
             assert ec == 0
             assert "combo-host" in output
 
-            output, ec = sb.run("cat /etc/resolv.conf")
+            output, ec = box.run("cat /etc/resolv.conf")
             assert ec == 0
             assert "8.8.8.8" in output
         finally:
-            sb.delete()
+            box.delete()
 
     def test_hostname_no_stderr_leak(self, tmp_path, shared_cache_dir):
         """Hostname setup errors should not leak into first command output."""
@@ -2015,15 +2015,15 @@ class TestConfigCombinations:
             env_base_dir=str(tmp_path / "envs"),
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-hostname-clean")
+        box = Sandbox(config, name="userns-hostname-clean")
         try:
-            output, ec = sb.run("echo clean_output")
+            output, ec = box.run("echo clean_output")
             assert ec == 0
             assert output.strip() == "clean_output", (
                 f"First command output should be clean, got: {output!r}"
             )
         finally:
-            sb.delete()
+            box.delete()
 
     def test_cow_volume_no_artifacts_after_delete(self, tmp_path, shared_cache_dir):
         """cow volume sandbox should leave no artifacts after delete."""
@@ -2041,9 +2041,9 @@ class TestConfigCombinations:
             env_base_dir=env_base,
             rootfs_cache_dir=shared_cache_dir,
         )
-        sb = Sandbox(config, name="userns-cow-cleanup")
-        sb.run("echo x > /data/new_file.txt")
-        sb.delete()
+        box = Sandbox(config, name="userns-cow-cleanup")
+        box.run("echo x > /data/new_file.txt")
+        box.delete()
 
         env_dir = Path(env_base) / "userns-cow-cleanup"
         assert not env_dir.exists(), (
@@ -2078,17 +2078,17 @@ class TestDevicesRootless:
             rootfs_cache_dir=shared_cache_dir,
             devices=["/dev/fuse"],
         )
-        sb = Sandbox(config, name="userns-dev-fuse")
+        box = Sandbox(config, name="userns-dev-fuse")
         try:
-            output, ec = sb.run("test -c /dev/fuse && echo exists")
+            output, ec = box.run("test -c /dev/fuse && echo exists")
             assert ec == 0
             assert "exists" in output
             # Verify it's a real character device with correct major:minor
-            output, ec = sb.run("stat -c '%t:%T' /dev/fuse")
+            output, ec = box.run("stat -c '%t:%T' /dev/fuse")
             assert ec == 0
             assert "a:e5" in output  # major 10, minor 229
         finally:
-            sb.delete()
+            box.delete()
 
     def test_kvm_device_passthrough(self, tmp_path, shared_cache_dir):
         """Bind-mounted /dev/kvm should be accessible in userns sandbox."""
@@ -2106,17 +2106,17 @@ class TestDevicesRootless:
             rootfs_cache_dir=shared_cache_dir,
             devices=["/dev/kvm"],
         )
-        sb = Sandbox(config, name="userns-dev-kvm")
+        box = Sandbox(config, name="userns-dev-kvm")
         try:
-            output, ec = sb.run("test -c /dev/kvm && echo exists")
+            output, ec = box.run("test -c /dev/kvm && echo exists")
             assert ec == 0
             assert "exists" in output
             # Verify it's a real character device with correct major:minor
-            output, ec = sb.run("stat -c '%t:%T' /dev/kvm")
+            output, ec = box.run("stat -c '%t:%T' /dev/kvm")
             assert ec == 0
             assert "a:e8" in output  # major 10, minor 232
         finally:
-            sb.delete()
+            box.delete()
 
     def test_device_survives_reset(self, tmp_path, shared_cache_dir):
         """Device passthrough should work after reset."""
@@ -2131,23 +2131,23 @@ class TestDevicesRootless:
             rootfs_cache_dir=shared_cache_dir,
             devices=["/dev/fuse"],
         )
-        sb = Sandbox(config, name="userns-dev-reset")
+        box = Sandbox(config, name="userns-dev-reset")
         try:
-            output, ec = sb.run("test -c /dev/fuse && echo before")
+            output, ec = box.run("test -c /dev/fuse && echo before")
             assert ec == 0
             assert "before" in output
 
-            sb.reset()
+            box.reset()
 
-            output, ec = sb.run("test -c /dev/fuse && echo after")
+            output, ec = box.run("test -c /dev/fuse && echo after")
             assert ec == 0
             assert "after" in output
             # Still a real device after reset
-            output, ec = sb.run("stat -c '%t:%T' /dev/fuse")
+            output, ec = box.run("stat -c '%t:%T' /dev/fuse")
             assert ec == 0
             assert "a:e5" in output
         finally:
-            sb.delete()
+            box.delete()
 
     def test_multiple_devices(self, tmp_path, shared_cache_dir):
         """Multiple devices can be passed through simultaneously."""
@@ -2166,14 +2166,14 @@ class TestDevicesRootless:
             rootfs_cache_dir=shared_cache_dir,
             devices=devices,
         )
-        sb = Sandbox(config, name="userns-multi-dev")
+        box = Sandbox(config, name="userns-multi-dev")
         try:
             for dev in devices:
-                output, ec = sb.run(f"test -c {dev} && echo ok")
+                output, ec = box.run(f"test -c {dev} && echo ok")
                 assert ec == 0, f"device {dev} not accessible"
                 assert "ok" in output
         finally:
-            sb.delete()
+            box.delete()
 
     def test_device_with_seccomp(self, tmp_path, shared_cache_dir):
         """Device passthrough works alongside seccomp filtering."""
@@ -2189,18 +2189,18 @@ class TestDevicesRootless:
             devices=["/dev/fuse"],
             seccomp=True,
         )
-        sb = Sandbox(config, name="userns-dev-seccomp")
+        box = Sandbox(config, name="userns-dev-seccomp")
         try:
             # Device works
-            output, ec = sb.run("test -c /dev/fuse && echo ok")
+            output, ec = box.run("test -c /dev/fuse && echo ok")
             assert ec == 0
             assert "ok" in output
             # Seccomp is active
-            output, ec = sb.run("cat /proc/self/status | grep Seccomp")
+            output, ec = box.run("cat /proc/self/status | grep Seccomp")
             assert ec == 0
             assert "2" in output
         finally:
-            sb.delete()
+            box.delete()
 
     def test_devices_feature_flag(self, tmp_path, shared_cache_dir):
         """features dict should include 'devices' when devices configured."""
@@ -2215,11 +2215,11 @@ class TestDevicesRootless:
             rootfs_cache_dir=shared_cache_dir,
             devices=["/dev/fuse"],
         )
-        sb = Sandbox(config, name="userns-dev-feat")
+        box = Sandbox(config, name="userns-dev-feat")
         try:
-            assert sb.features.get("devices") is True
+            assert box.features.get("devices") is True
         finally:
-            sb.delete()
+            box.delete()
 
     def test_nonexistent_device_graceful(self, tmp_path, shared_cache_dir):
         """Non-existent device should not crash sandbox creation."""
@@ -2232,18 +2232,18 @@ class TestDevicesRootless:
             rootfs_cache_dir=shared_cache_dir,
             devices=["/dev/does_not_exist_xyz"],
         )
-        sb = Sandbox(config, name="userns-dev-noexist")
+        box = Sandbox(config, name="userns-dev-noexist")
         try:
             # Sandbox should start fine, non-existent device just not mounted
-            output, ec = sb.run("echo works")
+            output, ec = box.run("echo works")
             assert ec == 0
             assert "works" in output
             # The bind mount silently fails; the touch file may remain but
             # should NOT be a character device (just a regular empty file)
-            output, ec = sb.run("test -c /dev/does_not_exist_xyz && echo char || echo not_char")
+            output, ec = box.run("test -c /dev/does_not_exist_xyz && echo char || echo not_char")
             assert "not_char" in output
         finally:
-            sb.delete()
+            box.delete()
 
     def test_kvm_ioctl_works(self, tmp_path, shared_cache_dir):
         """KVM ioctl should not be blocked by seccomp (only TIOCSTI is blocked)."""
@@ -2261,20 +2261,20 @@ class TestDevicesRootless:
             devices=["/dev/kvm"],
             seccomp=True,
         )
-        sb = Sandbox(config, name="userns-kvm-ioctl")
+        box = Sandbox(config, name="userns-kvm-ioctl")
         try:
             # Try python3 for ioctl test; skip if not available in image
-            output, ec = sb.run("which python3 >/dev/null 2>&1 && echo yes || echo no")
+            output, ec = box.run("which python3 >/dev/null 2>&1 && echo yes || echo no")
             if "no" in output:
                 # Fallback: just verify /dev/kvm is openable (not blocked by seccomp)
-                output, ec = sb.run(
+                output, ec = box.run(
                     "exec 3</dev/kvm && echo 'kvm_open=ok' && exec 3<&-"
                 )
                 assert ec == 0, f"Failed to open /dev/kvm: {output}"
                 assert "kvm_open=ok" in output
             else:
                 # KVM_GET_API_VERSION ioctl (0xAE00) should succeed
-                output, ec = sb.run(
+                output, ec = box.run(
                     "python3 -c '"
                     "import fcntl, os; "
                     "fd = os.open(\"/dev/kvm\", os.O_RDWR); "
@@ -2285,7 +2285,7 @@ class TestDevicesRootless:
                 assert ec == 0, f"KVM ioctl failed: {output}"
                 assert "kvm_api=12" in output
         finally:
-            sb.delete()
+            box.delete()
 
 
 class TestDevicesRootful:
@@ -2304,16 +2304,16 @@ class TestDevicesRootful:
             rootfs_cache_dir=shared_cache_dir,
             devices=["/dev/fuse"],
         )
-        sb = Sandbox(config, name="root-dev-fuse")
+        box = Sandbox(config, name="root-dev-fuse")
         try:
-            output, ec = sb.run("test -c /dev/fuse && echo exists")
+            output, ec = box.run("test -c /dev/fuse && echo exists")
             assert ec == 0
             assert "exists" in output
-            output, ec = sb.run("stat -c '%t:%T' /dev/fuse")
+            output, ec = box.run("stat -c '%t:%T' /dev/fuse")
             assert ec == 0
             assert "a:e5" in output  # major 10, minor 229
         finally:
-            sb.delete()
+            box.delete()
 
     def test_device_survives_reset(self, tmp_path, shared_cache_dir):
         """Device passthrough should work after reset in rootful mode."""
@@ -2328,19 +2328,19 @@ class TestDevicesRootful:
             rootfs_cache_dir=shared_cache_dir,
             devices=["/dev/fuse"],
         )
-        sb = Sandbox(config, name="root-dev-reset")
+        box = Sandbox(config, name="root-dev-reset")
         try:
-            output, ec = sb.run("test -c /dev/fuse && echo before")
+            output, ec = box.run("test -c /dev/fuse && echo before")
             assert ec == 0
             assert "before" in output
 
-            sb.reset()
+            box.reset()
 
-            output, ec = sb.run("test -c /dev/fuse && echo after")
+            output, ec = box.run("test -c /dev/fuse && echo after")
             assert ec == 0
             assert "after" in output
         finally:
-            sb.delete()
+            box.delete()
 
     def test_kvm_ioctl_rootful(self, tmp_path, shared_cache_dir):
         """KVM ioctl should work in rootful mode with seccomp."""
@@ -2356,17 +2356,17 @@ class TestDevicesRootful:
             devices=["/dev/kvm"],
             seccomp=True,
         )
-        sb = Sandbox(config, name="root-kvm-ioctl")
+        box = Sandbox(config, name="root-kvm-ioctl")
         try:
-            output, ec = sb.run("which python3 >/dev/null 2>&1 && echo yes || echo no")
+            output, ec = box.run("which python3 >/dev/null 2>&1 && echo yes || echo no")
             if "no" in output:
-                output, ec = sb.run(
+                output, ec = box.run(
                     "exec 3</dev/kvm && echo 'kvm_open=ok' && exec 3<&-"
                 )
                 assert ec == 0, f"Failed to open /dev/kvm: {output}"
                 assert "kvm_open=ok" in output
             else:
-                output, ec = sb.run(
+                output, ec = box.run(
                     "python3 -c '"
                     "import fcntl, os; "
                     "fd = os.open(\"/dev/kvm\", os.O_RDWR); "
@@ -2377,7 +2377,7 @@ class TestDevicesRootful:
                 assert ec == 0, f"KVM ioctl failed: {output}"
                 assert "kvm_api=12" in output
         finally:
-            sb.delete()
+            box.delete()
 
     def test_devices_feature_flag(self, tmp_path, shared_cache_dir):
         """features dict should include 'devices' in rootful mode."""
@@ -2390,8 +2390,8 @@ class TestDevicesRootful:
             rootfs_cache_dir=shared_cache_dir,
             devices=["/dev/null"],
         )
-        sb = Sandbox(config, name="root-dev-feat")
+        box = Sandbox(config, name="root-dev-feat")
         try:
-            assert sb.features.get("devices") is True
+            assert box.features.get("devices") is True
         finally:
-            sb.delete()
+            box.delete()

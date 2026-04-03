@@ -17,12 +17,12 @@ Usage:
     >>> from nitrobox import Sandbox, SandboxConfig
     >>> from nitrobox.checkpoint import CheckpointManager
     >>>
-    >>> sb = Sandbox(SandboxConfig(image="ubuntu:22.04", working_dir="/workspace"))
-    >>> mgr = CheckpointManager(sb)
+    >>> box = Sandbox(SandboxConfig(image="ubuntu:22.04", working_dir="/workspace"))
+    >>> mgr = CheckpointManager(box)
     >>>
-    >>> sb.run("export FOO=bar && cd /tmp")
+    >>> box.run("export FOO=bar && cd /tmp")
     >>> mgr.save("/tmp/ckpt_v1")        # saves filesystem + process state
-    >>> sb.run("rm -rf /workspace/*")   # destructive action
+    >>> box.run("rm -rf /workspace/*")   # destructive action
     >>> mgr.restore("/tmp/ckpt_v1")     # exact rollback: env vars, cwd, everything
 """
 

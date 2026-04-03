@@ -34,40 +34,40 @@ def main():
         # are all ON by default — no config needed.
     )
 
-    sb = Sandbox(config, name="demo")
+    box = Sandbox(config, name="demo")
 
     # ---- Feature detection ----
-    print(f"Active features: {sb.features}")
+    print(f"Active features: {box.features}")
 
     # ---- Run commands ----
-    output, ec = sb.run("echo hello from sandbox")
+    output, ec = box.run("echo hello from sandbox")
     print(f"[exit={ec}] {output.strip()}")
 
-    output, ec = sb.run("cat /etc/os-release | head -2")
+    output, ec = box.run("cat /etc/os-release | head -2")
     print(f"[exit={ec}] {output.strip()}")
 
     # ---- File I/O ----
-    sb.write_file("/workspace/test.txt", "hello world\n")
-    content = sb.read_file("/workspace/test.txt")
+    box.write_file("/workspace/test.txt", "hello world\n")
+    content = box.read_file("/workspace/test.txt")
     print(f"File content: {content.strip()}")
 
     # ---- Volumes ----
-    output, ec = sb.run("cat /mnt/shared/host_file.txt")
+    output, ec = box.run("cat /mnt/shared/host_file.txt")
     print(f"Volume (ro): {output.strip()}")
-    output, ec = sb.run("touch /mnt/shared/test 2>&1")
+    output, ec = box.run("touch /mnt/shared/test 2>&1")
     print(f"Volume write (should fail): exit={ec}")
 
     # ---- Background processes ----
-    handle = sb.run_background("sleep 100")
-    output, running = sb.check_background(handle)
+    handle = box.run_background("sleep 100")
+    output, running = box.check_background(handle)
     print(f"Background: running={running}")
-    all_procs = sb.list_background()
+    all_procs = box.list_background()
     print(f"All background: {all_procs}")
-    sb.stop_background(handle)
+    box.stop_background(handle)
     print("Background process stopped")
 
     # ---- Interactive processes (popen) ----
-    proc = sb.popen("bash")
+    proc = box.popen("bash")
     proc.stdin.write(b"echo popen_works\n")
     proc.stdin.flush()
     line = proc.stdout.readline()
@@ -75,19 +75,19 @@ def main():
     proc.terminate()
 
     # ---- Filesystem snapshot/restore (no root required) ----
-    sb.run("echo snapshot_v1 > /workspace/data.txt")
-    sb.fs_snapshot("/tmp/nbx_demo_snapshot")
+    box.run("echo snapshot_v1 > /workspace/data.txt")
+    box.fs_snapshot("/tmp/nbx_demo_snapshot")
 
-    sb.run("echo snapshot_v2 > /workspace/data.txt")
-    sb.fs_restore("/tmp/nbx_demo_snapshot")
+    box.run("echo snapshot_v2 > /workspace/data.txt")
+    box.fs_restore("/tmp/nbx_demo_snapshot")
 
-    output, _ = sb.run("cat /workspace/data.txt")
+    output, _ = box.run("cat /workspace/data.txt")
     print(f"After fs_restore: {output.strip()}")  # snapshot_v1
     shutil.rmtree("/tmp/nbx_demo_snapshot", ignore_errors=True)
 
     # ---- Save as Docker image ----
-    sb.run("echo image_data > /workspace/exported.txt")
-    sb.save_as_image("nbx-demo:cached")
+    box.run("echo image_data > /workspace/exported.txt")
+    box.save_as_image("nbx-demo:cached")
     print("Saved sandbox state as Docker image: nbx-demo:cached")
 
     sb2 = Sandbox(SandboxConfig(image="nbx-demo:cached", working_dir="/workspace"), name="from-cache")
@@ -98,44 +98,44 @@ def main():
 
     # ---- CRIU process checkpoint/restore ----
     if CheckpointManager.check_available():
-        mgr = CheckpointManager(sb)
+        mgr = CheckpointManager(box)
 
-        sb.run("echo criu_v1 > /workspace/state.txt")
+        box.run("echo criu_v1 > /workspace/state.txt")
         shutil.rmtree("/tmp/nbx_demo_ckpt", ignore_errors=True)
         mgr.save("/tmp/nbx_demo_ckpt")
         print("CRIU checkpoint saved")
 
-        sb.run("rm -rf /workspace/*")  # destructive action
+        box.run("rm -rf /workspace/*")  # destructive action
         mgr.restore("/tmp/nbx_demo_ckpt")
 
-        output, _ = sb.run("cat /workspace/state.txt")
+        output, _ = box.run("cat /workspace/state.txt")
         print(f"After CRIU restore: {output.strip()}")  # criu_v1
         shutil.rmtree("/tmp/nbx_demo_ckpt", ignore_errors=True)
     else:
         print("CRIU not available, skipping checkpoint demo")
 
     # ---- Reset to clean image ----
-    sb.reset()
-    output, ec = sb.run("cat /workspace/test.txt 2>&1")
+    box.reset()
+    output, ec = box.run("cat /workspace/test.txt 2>&1")
     print(f"After reset [exit={ec}]: {output.strip()}")
 
     # ---- Security: masked paths ----
-    output, _ = sb.run("cat /proc/kcore 2>&1 | wc -c")
+    output, _ = box.run("cat /proc/kcore 2>&1 | wc -c")
     print(f"/proc/kcore bytes (masked → 0): {output.strip()}")
 
     # ---- Pressure monitoring (PSI) ----
-    psi = sb.pressure()
+    psi = box.pressure()
     if psi:
         print(f"PSI: cpu={psi.get('cpu', {}).get('avg10', 0):.1f}% "
               f"mem={psi.get('memory', {}).get('avg10', 0):.1f}% "
               f"io={psi.get('io', {}).get('avg10', 0):.1f}%")
 
     # ---- Memory reclamation ----
-    reclaimed = sb.reclaim_memory()
+    reclaimed = box.reclaim_memory()
     print(f"reclaim_memory: {'ok' if reclaimed else 'not supported'}")
 
     # ---- Clean up ----
-    sb.delete()
+    box.delete()
     shutil.rmtree(host_dir, ignore_errors=True)
     print("Done.")
 
@@ -156,19 +156,19 @@ def demo_layer_cache():
 
     for img in images:
         t0 = time.monotonic()
-        sb = Sandbox(SandboxConfig(image=img), name=f"layer-demo-{img.replace(':', '-')}")
+        box = Sandbox(SandboxConfig(image=img), name=f"layer-demo-{img.replace(':', '-')}")
         elapsed = (time.monotonic() - t0) * 1000
-        sandboxes.append(sb)
+        sandboxes.append(box)
 
-        layers = getattr(sb, "_layer_dirs", None)
+        layers = getattr(box, "_layer_dirs", None)
         n_layers = len(layers) if layers else 0
-        out, _ = sb.run("python3 --version")
+        out, _ = box.run("python3 --version")
         print(f"  {img}: {elapsed:.0f}ms, {n_layers} layers, {out.strip()}")
 
     # Show layer deduplication
     all_layers = []
-    for sb in sandboxes:
-        layers = getattr(sb, "_layer_dirs", None) or []
+    for box in sandboxes:
+        layers = getattr(box, "_layer_dirs", None) or []
         all_layers.append({l.name for l in layers})
 
     if len(all_layers) == 2:
@@ -183,8 +183,8 @@ def demo_layer_cache():
         total_bytes = sum(f.stat().st_size for f in cache_dir.rglob("*") if f.is_file())
         print(f"  Layer cache: {total_bytes / 1024 / 1024:.0f}MB on disk")
 
-    for sb in sandboxes:
-        sb.delete()
+    for box in sandboxes:
+        box.delete()
 
 
 def demo_port_mapping():
@@ -201,10 +201,10 @@ def demo_port_mapping():
         net_isolate=True,
         port_map=["18080:8000"],
     )
-    sb = Sandbox(config, name="port-demo")
+    box = Sandbox(config, name="port-demo")
     try:
-        sb.write_file("/tmp/index.html", "<h1>Hello from sandbox!</h1>\n")
-        sb.run_background("python3 -m http.server 8000 --directory /tmp")
+        box.write_file("/tmp/index.html", "<h1>Hello from sandbox!</h1>\n")
+        box.run_background("python3 -m http.server 8000 --directory /tmp")
 
         # Poll until server is ready
         import time
@@ -221,7 +221,7 @@ def demo_port_mapping():
         print(f"  HTTP status: {resp.status}")
         print(f"  Body: {resp.read().decode().strip()}")
     finally:
-        sb.delete()
+        box.delete()
 
 
 def demo_qemu_vm():
@@ -251,18 +251,18 @@ def demo_qemu_vm():
         devices=["/dev/kvm"],
         volumes=[f"{vm_dir}:/vm:rw"],
     )
-    sb = Sandbox(config, name="vm-demo")
+    box = Sandbox(config, name="vm-demo")
 
     # Check if QEMU is installed in the sandbox
-    _, ec = sb.run("which qemu-system-x86_64 >/dev/null 2>&1")
+    _, ec = box.run("which qemu-system-x86_64 >/dev/null 2>&1")
     if ec != 0:
         print("  SKIP (qemu-system-x86_64 not in sandbox image)")
-        print("  Install with: sb.run('apt-get install -y qemu-system-x86')")
-        sb.delete()
+        print("  Install with: box.run('apt-get install -y qemu-system-x86')")
+        box.delete()
         shutil.rmtree(vm_dir, ignore_errors=True)
         return
 
-    vm = QemuVM(sb, disk="/vm/test.qcow2", memory="128M", cpus=1)
+    vm = QemuVM(box, disk="/vm/test.qcow2", memory="128M", cpus=1)
     vm.start(timeout=30)
     print(f"  VM started: {vm}")
 
@@ -286,7 +286,7 @@ def demo_qemu_vm():
     print(f"  snapshots: {'ready' in info}")
 
     vm.stop()
-    sb.delete()
+    box.delete()
     shutil.rmtree(vm_dir, ignore_errors=True)
 
 

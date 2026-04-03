@@ -55,7 +55,7 @@ class _HealthMonitor:
 
     def __init__(
         self,
-        sb: Sandbox,
+        box: Sandbox,
         cmd: str,
         *,
         interval: float = 30.0,
@@ -65,7 +65,7 @@ class _HealthMonitor:
         retries: int = 3,
     ) -> None:
         self.status: str = "starting"
-        self._sb = sb
+        self._box = box
         self._cmd = cmd
         self._interval = interval
         self._timeout = timeout
@@ -84,7 +84,7 @@ class _HealthMonitor:
             check_interval = self._start_interval if in_start else self._interval
 
             try:
-                _, ec = self._sb.run(self._cmd, timeout=int(self._timeout) or 5)
+                _, ec = self._box.run(self._cmd, timeout=int(self._timeout) or 5)
                 if ec == 0:
                     self._consecutive_failures = 0
                     self.status = "healthy"
@@ -206,8 +206,8 @@ class ComposeProject:
                         if condition == "service_healthy":
                             self._wait_healthy(dep_name, timeout)
 
-                sb = self._create_sandbox(svc, hosts_entries)
-                self._sandboxes[name] = sb
+                box = self._create_sandbox(svc, hosts_entries)
+                self._sandboxes[name] = box
                 self._start_service(name, svc)
                 self._start_health_monitor(name, svc)
 
@@ -260,10 +260,10 @@ class ComposeProject:
 
         # Reverse order for graceful shutdown
         for name in reversed(self._startup_order):
-            sb = self._sandboxes.pop(name, None)
-            if sb:
+            box = self._sandboxes.pop(name, None)
+            if box:
                 try:
-                    sb.delete()
+                    box.delete()
                 except Exception as e:
                     logger.warning("Failed to delete sandbox %s: %s", name, e)
             self._bg_handles.pop(name, None)
@@ -293,13 +293,13 @@ class ComposeProject:
         hosts_entries = {name: "127.0.0.1" for name in self._defs}
 
         for name in self._startup_order:
-            sb = self._sandboxes.get(name)
+            box = self._sandboxes.get(name)
             svc = self._defs[name]
-            if sb:
-                sb.reset()
+            if box:
+                box.reset()
                 # Re-write /etc/hosts (cleared by upper dir reset)
-                self._write_hosts(sb, hosts_entries, svc.extra_hosts)
-                self._apply_sysctls(sb, svc)
+                self._write_hosts(box, hosts_entries, svc.extra_hosts)
+                self._apply_sysctls(box, svc)
 
         # Re-start all service commands after reset
         for name in self._startup_order:
@@ -313,10 +313,10 @@ class ComposeProject:
         **kwargs: Any,
     ) -> tuple[str, int]:
         """Run a command in a service's sandbox."""
-        sb = self._sandboxes.get(service)
-        if sb is None:
+        box = self._sandboxes.get(service)
+        if box is None:
             raise KeyError(f"Service {service!r} not found or not running")
-        return sb.run(command, **kwargs)
+        return box.run(command, **kwargs)
 
     # -- internals ----------------------------------------------------- #
 
@@ -526,9 +526,9 @@ class ComposeProject:
             config_kwargs["rootfs_cache_dir"] = self._rootfs_cache_dir
 
         config = SandboxConfig(**config_kwargs)
-        sb = Sandbox(config, name=sandbox_name)
+        box = Sandbox(config, name=sandbox_name)
 
-        self._write_hosts(sb, hosts, svc.extra_hosts)
+        self._write_hosts(box, hosts, svc.extra_hosts)
         # Write /etc/resolv.conf with pasta DNS forwarder when using
         # shared network (matching Podman's pod networking behaviour:
         # pastaResult.DNSForwardIPs → resolv.conf nameservers).
@@ -536,13 +536,13 @@ class ComposeProject:
             primary_net = (svc.networks or ["default"])[0]
             sn = self._shared_nets.get(primary_net)
             if sn is not None and sn.has_pasta:
-                self._write_resolv(sb, sn.dns_forward_ips)
-        self._apply_sysctls(sb, svc)
-        return sb
+                self._write_resolv(box, sn.dns_forward_ips)
+        self._apply_sysctls(box, svc)
+        return box
 
     @staticmethod
     def _write_hosts(
-        sb: Sandbox,
+        box: Sandbox,
         hosts: dict[str, str],
         extra_hosts: list[str] | None = None,
     ) -> None:
@@ -567,15 +567,15 @@ class ComposeProject:
         # Write from inside the sandbox so overlayfs upper is updated
         # within the mount namespace.  Remove any stale whiteout first.
         try:
-            sb.run(
+            box.run(
                 f"rm -rf /etc/hosts 2>/dev/null; printf '{content}' > /etc/hosts",
                 timeout=5,
             )
         except Exception as exc:
-            logger.warning("Failed to write /etc/hosts for %s: %s", sb._name, exc)
+            logger.warning("Failed to write /etc/hosts for %s: %s", box._name, exc)
 
     @staticmethod
-    def _write_resolv(sb: Sandbox, nameservers: list[str]) -> None:
+    def _write_resolv(box: Sandbox, nameservers: list[str]) -> None:
         """Write /etc/resolv.conf with the given nameservers.
 
         Mirrors Podman's behaviour: when pasta provides NAT + DNS
@@ -586,21 +586,21 @@ class ComposeProject:
         lines = [f"nameserver {ns}" for ns in nameservers]
         content = "\\n".join(lines) + "\\n"
         try:
-            sb.run(
+            box.run(
                 f"rm -rf /etc/resolv.conf 2>/dev/null; printf '{content}' > /etc/resolv.conf",
                 timeout=5,
             )
         except Exception as exc:
-            logger.warning("Failed to write /etc/resolv.conf for %s: %s", sb._name, exc)
+            logger.warning("Failed to write /etc/resolv.conf for %s: %s", box._name, exc)
 
     @staticmethod
-    def _apply_sysctls(sb: Sandbox, svc: _Service) -> None:
+    def _apply_sysctls(box: Sandbox, svc: _Service) -> None:
         """Apply ``sysctls`` by writing to ``/proc/sys/`` inside the sandbox."""
         for key, value in svc.sysctls.items():
             path = "/proc/sys/" + key.replace(".", "/")
             try:
                 import shlex
-                _, ec = sb.run(
+                _, ec = box.run(
                     f"printf '%s' {shlex.quote(str(value))} > {path} 2>/dev/null",
                     timeout=5,
                 )
@@ -683,8 +683,8 @@ class ComposeProject:
         cmd = self._cmd_string(svc)
         if not cmd:
             return
-        sb = self._sandboxes.get(name)
-        if sb is None:
+        box = self._sandboxes.get(name)
+        if box is None:
             return
 
         # Apply restart policy
@@ -695,7 +695,7 @@ class ComposeProject:
         if prefix:
             cmd = f"{prefix}; {cmd}"
 
-        handle = sb.run_background(cmd)
+        handle = box.run_background(cmd)
         self._bg_handles[name] = handle
 
     def _start_health_monitor(self, name: str, svc: _Service) -> None:

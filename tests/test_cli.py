@@ -81,12 +81,12 @@ class TestCli:
 
         sandboxes = []
         for name in ("kill-all-1", "kill-all-2"):
-            sb = Sandbox(SandboxConfig(
+            box = Sandbox(SandboxConfig(
                 image=TEST_IMAGE,
                 env_base_dir=env_dir,
                 rootfs_cache_dir=shared_cache_dir,
             ), name=name)
-            sandboxes.append(sb)
+            sandboxes.append(box)
 
         result = _nbx("--dir", env_dir, "ps")
         assert "kill-all-1" in result.stdout
@@ -103,7 +103,7 @@ class TestCli:
         _skip_if_root()
         _requires_docker()
         env_dir = str(tmp_path / "envs")
-        sb = Sandbox(SandboxConfig(
+        box = Sandbox(SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=env_dir,
             rootfs_cache_dir=shared_cache_dir,
@@ -114,7 +114,7 @@ class TestCli:
             assert "cli-ps-test" in result.stdout
             assert "running" in result.stdout
         finally:
-            sb.delete()
+            box.delete()
 
     def test_kill_and_cleanup(self, tmp_path, shared_cache_dir):
         """kill should terminate the sandbox shell and clean up the dir."""
@@ -128,7 +128,7 @@ class TestCli:
                 "python", "-c",
                 f"from nitrobox import Sandbox, SandboxConfig; "
                 f"import time; "
-                f"sb = Sandbox(SandboxConfig(image='{TEST_IMAGE}', "
+                f"box = Sandbox(SandboxConfig(image='{TEST_IMAGE}', "
                 f"env_base_dir='{env_dir}', "
                 f"rootfs_cache_dir='{shared_cache_dir}'), "
                 f"name='cli-kill-test'); "
@@ -168,7 +168,7 @@ class TestCli:
         _requires_docker()
         env_dir = str(tmp_path / "envs")
 
-        sb = Sandbox(SandboxConfig(
+        box = Sandbox(SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=env_dir,
             rootfs_cache_dir=shared_cache_dir,
@@ -184,7 +184,7 @@ class TestCli:
         # We're still alive — the test process wasn't killed
         # Sandbox is now broken (shell dead) but we can still clean up
         try:
-            sb.delete()
+            box.delete()
         except Exception:
             pass  # shell already dead, delete may partially fail
         # cleanup_stale handles the rest
