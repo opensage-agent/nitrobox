@@ -15,7 +15,7 @@
 use std::ffi::CString;
 use std::io;
 use std::os::fd::IntoRawFd;
-use std::os::unix::fs::{symlink, OpenOptionsExt};
+use std::os::unix::fs::{OpenOptionsExt, symlink};
 use std::path::{Path, PathBuf};
 
 // ======================================================================
@@ -34,8 +34,7 @@ pub fn extract_tar_in_userns(
 ) -> io::Result<()> {
     let (userns_r, userns_w) =
         nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(io::Error::from)?;
-    let (go_r, go_w) =
-        nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(io::Error::from)?;
+    let (go_r, go_w) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(io::Error::from)?;
 
     let userns_r = userns_r.into_raw_fd();
     let userns_w = userns_w.into_raw_fd();
@@ -94,10 +93,7 @@ pub fn extract_tar_in_userns(
 
     let mapping_result = setup_id_mapping(pid, outer_uid, outer_gid, sub_start, sub_count);
 
-    let _ = nix::unistd::write(
-        unsafe { std::os::fd::BorrowedFd::borrow_raw(go_w) },
-        b"G",
-    );
+    let _ = nix::unistd::write(unsafe { std::os::fd::BorrowedFd::borrow_raw(go_w) }, b"G");
     unsafe { libc::close(go_w) };
 
     if let Err(e) = mapping_result {
@@ -185,7 +181,8 @@ fn unpack<R: io::Read>(reader: R, dest: &str) -> io::Result<()> {
         if !resolved.starts_with(dest) {
             return Err(io::Error::other(format!(
                 "path breakout: {} is outside {}",
-                raw_path.display(), dest.display()
+                raw_path.display(),
+                dest.display()
             )));
         }
 
@@ -208,10 +205,7 @@ fn unpack<R: io::Read>(reader: R, dest: &str) -> io::Result<()> {
         let mode = entry.header().mode()?;
         let mtime = entry.header().mtime()? as i64;
 
-        let file_name = cleaned
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let file_name = cleaned.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         // -- Skip device nodes (Podman: extractTarFileEntry line 750-754) --
         if entry_type == tar::EntryType::Block || entry_type == tar::EntryType::Char {
@@ -311,7 +305,8 @@ fn unpack<R: io::Read>(reader: R, dest: &str) -> io::Result<()> {
                 if !link_target.is_absolute() && !resolved.starts_with(dest) {
                     return Err(io::Error::other(format!(
                         "symlink breakout: {} -> {}",
-                        full_path.display(), link_target.display()
+                        full_path.display(),
+                        link_target.display()
                     )));
                 }
 
@@ -332,7 +327,8 @@ fn unpack<R: io::Read>(reader: R, dest: &str) -> io::Result<()> {
                 if !target_abs.starts_with(dest) {
                     return Err(io::Error::other(format!(
                         "hardlink breakout: {} -> {}",
-                        full_path.display(), link_target.display()
+                        full_path.display(),
+                        link_target.display()
                     )));
                 }
                 // Podman: handleLLink uses linkat(AT_FDCWD, target, AT_FDCWD, path, 0)
@@ -344,9 +340,8 @@ fn unpack<R: io::Read>(reader: R, dest: &str) -> io::Result<()> {
                 // Podman: handleTarTypeBlockCharFifo — mknod with S_IFIFO
                 let c_path = CString::new(full_path.as_os_str().as_encoded_bytes())
                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-                let ret = unsafe {
-                    libc::mknod(c_path.as_ptr(), libc::S_IFIFO | (mode & 0o7777), 0)
-                };
+                let ret =
+                    unsafe { libc::mknod(c_path.as_ptr(), libc::S_IFIFO | (mode & 0o7777), 0) };
                 if ret < 0 {
                     return Err(io::Error::last_os_error());
                 }
@@ -482,8 +477,14 @@ fn utimes(path: &Path, mtime: i64) -> io::Result<()> {
     let c = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let times = [
-        libc::timespec { tv_sec: mtime, tv_nsec: 0 },
-        libc::timespec { tv_sec: mtime, tv_nsec: 0 },
+        libc::timespec {
+            tv_sec: mtime,
+            tv_nsec: 0,
+        },
+        libc::timespec {
+            tv_sec: mtime,
+            tv_nsec: 0,
+        },
     ];
     if unsafe { libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) } < 0 {
         return Err(io::Error::last_os_error());
@@ -496,8 +497,14 @@ fn lutimes(path: &Path, mtime: i64) -> io::Result<()> {
     let c = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let times = [
-        libc::timespec { tv_sec: mtime, tv_nsec: 0 },
-        libc::timespec { tv_sec: mtime, tv_nsec: 0 },
+        libc::timespec {
+            tv_sec: mtime,
+            tv_nsec: 0,
+        },
+        libc::timespec {
+            tv_sec: mtime,
+            tv_nsec: 0,
+        },
     ];
     if unsafe {
         libc::utimensat(
@@ -517,8 +524,7 @@ fn lutimes(path: &Path, mtime: i64) -> io::Result<()> {
 fn set_xattr(path: &Path, name: &str, value: &[u8]) -> io::Result<()> {
     let c_path = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let c_name = CString::new(name)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let c_name = CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let ret = unsafe {
         libc::setxattr(
             c_path.as_ptr(),
@@ -546,8 +552,7 @@ fn set_xattr(path: &Path, name: &str, value: &[u8]) -> io::Result<()> {
 fn lsetxattr(path: &Path, name: &str, value: &[u8]) -> io::Result<()> {
     let c_path = CString::new(path.as_os_str().as_encoded_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-    let c_name = CString::new(name)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let c_name = CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let ret = unsafe {
         libc::lsetxattr(
             c_path.as_ptr(),
@@ -582,8 +587,7 @@ pub fn rmtree_in_userns(
 ) -> io::Result<()> {
     let (userns_r, userns_w) =
         nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(io::Error::from)?;
-    let (go_r, go_w) =
-        nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(io::Error::from)?;
+    let (go_r, go_w) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(io::Error::from)?;
 
     let userns_r = userns_r.into_raw_fd();
     let userns_w = userns_w.into_raw_fd();
@@ -592,8 +596,7 @@ pub fn rmtree_in_userns(
 
     let c_rm = CString::new("rm").unwrap();
     let c_rf = CString::new("-rf").unwrap();
-    let c_path =
-        CString::new(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+    let c_path = CString::new(path).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
 
     let pid = unsafe { libc::fork() };
     if pid < 0 {
@@ -637,10 +640,7 @@ pub fn rmtree_in_userns(
     );
     unsafe { libc::close(userns_r) };
     let _ = setup_id_mapping(pid, outer_uid, outer_gid, sub_start, sub_count);
-    let _ = nix::unistd::write(
-        unsafe { std::os::fd::BorrowedFd::borrow_raw(go_w) },
-        b"G",
-    );
+    let _ = nix::unistd::write(unsafe { std::os::fd::BorrowedFd::borrow_raw(go_w) }, b"G");
     unsafe { libc::close(go_w) };
 
     let mut status: libc::c_int = 0;

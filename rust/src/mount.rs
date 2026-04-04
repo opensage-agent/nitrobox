@@ -41,7 +41,9 @@ fn parse_kernel_version(ver: &str) -> (u32, u32) {
         if let Some(dot) = word.find('.') {
             if let Ok(major) = word[..dot].parse::<u32>() {
                 let rest = &word[dot + 1..];
-                let minor_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+                let minor_end = rest
+                    .find(|c: char| !c.is_ascii_digit())
+                    .unwrap_or(rest.len());
                 let minor = rest[..minor_end].parse::<u32>().unwrap_or(0);
                 return (major, minor);
             }
@@ -180,12 +182,15 @@ fn mount_overlay_legacy(
 
     let rel_lowers: Vec<String> = lowers
         .iter()
-        .map(|l| l.strip_prefix(&common).unwrap_or(l).trim_start_matches('/').to_string())
+        .map(|l| {
+            l.strip_prefix(&common)
+                .unwrap_or(l)
+                .trim_start_matches('/')
+                .to_string()
+        })
         .collect();
     let rel_spec = rel_lowers.join(":");
-    let mut rel_options = format!(
-        "lowerdir={rel_spec},upperdir={upper_dir},workdir={work_dir}",
-    );
+    let mut rel_options = format!("lowerdir={rel_spec},upperdir={upper_dir},workdir={work_dir}",);
     for opt in extra_opts {
         rel_options.push(',');
         rel_options.push_str(opt);
@@ -193,7 +198,8 @@ fn mount_overlay_legacy(
 
     log::debug!(
         "overlay legacy: mount data too long ({} bytes), using chdir to {common} ({} bytes)",
-        options.len(), rel_options.len(),
+        options.len(),
+        rel_options.len(),
     );
 
     // Fork + chdir + mount (matching Podman's mountOverlayFrom).
@@ -209,7 +215,13 @@ fn mount_overlay_legacy(
     match unsafe { nix::unistd::fork() } {
         Ok(nix::unistd::ForkResult::Child) => {
             let code = mount_overlay_from_child(
-                &common, &lowers_clone, &upper_s, &work_s, &target_s, &extra_s, page_size,
+                &common,
+                &lowers_clone,
+                &upper_s,
+                &work_s,
+                &target_s,
+                &extra_s,
+                page_size,
             );
             unsafe { libc::_exit(code) };
         }
@@ -241,16 +253,27 @@ fn mount_overlay_from_child(
     let _ = nix::unistd::chdir(common);
     let rel_lowers: Vec<String> = lowers
         .iter()
-        .map(|l| l.strip_prefix(common).unwrap_or(l).trim_start_matches('/').to_string())
+        .map(|l| {
+            l.strip_prefix(common)
+                .unwrap_or(l)
+                .trim_start_matches('/')
+                .to_string()
+        })
         .collect();
     let rel_spec = rel_lowers.join(":");
     let mut opts = format!("lowerdir={rel_spec},upperdir={upper_dir},workdir={work_dir}");
-    for o in extra_opts { opts.push(','); opts.push_str(o); }
+    for o in extra_opts {
+        opts.push(',');
+        opts.push_str(o);
+    }
 
     if opts.len() < page_size {
         let ret = nix::mount::mount(
-            Some("overlay"), target, Some("overlay"),
-            nix::mount::MsFlags::empty(), Some(opts.as_str()),
+            Some("overlay"),
+            target,
+            Some("overlay"),
+            nix::mount::MsFlags::empty(),
+            Some(opts.as_str()),
         );
         return i32::from(ret.is_err());
     }
@@ -259,18 +282,28 @@ fn mount_overlay_from_child(
     // (matching Podman mount.go:139-163)
     let mut fds: Vec<std::os::fd::OwnedFd> = Vec::new();
     for lower in lowers {
-        match nix::fcntl::open(lower.as_str(), nix::fcntl::OFlag::O_RDONLY, nix::sys::stat::Mode::empty()) {
+        match nix::fcntl::open(
+            lower.as_str(),
+            nix::fcntl::OFlag::O_RDONLY,
+            nix::sys::stat::Mode::empty(),
+        ) {
             Ok(fd) => fds.push(fd),
             Err(_) => return 1,
         }
     }
-    let fd_lowers: Vec<String> = fds.iter().map(|fd| {
-        use std::os::fd::AsRawFd;
-        fd.as_raw_fd().to_string()
-    }).collect();
+    let fd_lowers: Vec<String> = fds
+        .iter()
+        .map(|fd| {
+            use std::os::fd::AsRawFd;
+            fd.as_raw_fd().to_string()
+        })
+        .collect();
     let fd_spec = fd_lowers.join(":");
     opts = format!("lowerdir={fd_spec},upperdir={upper_dir},workdir={work_dir}");
-    for o in extra_opts { opts.push(','); opts.push_str(o); }
+    for o in extra_opts {
+        opts.push(',');
+        opts.push_str(o);
+    }
 
     if opts.len() >= page_size {
         return 1; // still too long, give up
@@ -278,8 +311,11 @@ fn mount_overlay_from_child(
 
     let _ = nix::unistd::chdir("/proc/self/fd");
     let ret = nix::mount::mount(
-        Some("overlay"), target, Some("overlay"),
-        nix::mount::MsFlags::empty(), Some(opts.as_str()),
+        Some("overlay"),
+        target,
+        Some("overlay"),
+        nix::mount::MsFlags::empty(),
+        Some(opts.as_str()),
     );
     i32::from(ret.is_err())
 }

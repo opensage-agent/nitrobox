@@ -547,10 +547,9 @@ fn py_image_store_clear() {
 fn py_parse_image_ref(image: &str) -> PyResult<(String, String, String)> {
     use container_image_dist_ref::ImgRef;
 
-    let parsed = ImgRef::new(image)
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(
-            format!("Invalid image ref '{image}': {e:?}"),
-        ))?;
+    let parsed = ImgRef::new(image).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid image ref '{image}': {e:?}"))
+    })?;
 
     // Get crate-parsed domain and path.
     let raw_domain = parsed.domain().map(|d| d.to_str());
