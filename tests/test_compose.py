@@ -1685,6 +1685,115 @@ class TestNetworkModeNoneIntegration:
 # ------------------------------------------------------------------ #
 
 
+class TestDownOptions:
+    """Tests for down(rmi=, volumes=, timeout=)."""
+
+    def _skip_if_no_sandbox(self):
+        if os.geteuid() == 0:
+            pytest.skip("compose test must run as non-root")
+        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+            pytest.skip("requires Docker")
+
+    def test_down_rmi_all_removes_layer_cache(self, tmp_path):
+        """down(rmi='all') removes cached rootfs layers for project images."""
+        self._skip_if_no_sandbox()
+        from pathlib import Path
+
+        cache_dir = str(tmp_path / "cache")
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-rmi",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=cache_dir,
+        )
+        proj.up()
+        proj.services["app"].run("echo ok")
+
+        cache_layers = Path(cache_dir) / "layers"
+        assert cache_layers.exists()
+        cached_before = set(cache_layers.iterdir())
+        assert len(cached_before) > 0
+
+        proj.down(rmi="all")
+
+        cached_after = set(cache_layers.iterdir()) if cache_layers.exists() else set()
+        assert len(cached_after) < len(cached_before)
+
+    def test_down_no_rmi_keeps_layer_cache(self, tmp_path):
+        """down() without rmi keeps cached rootfs layers."""
+        self._skip_if_no_sandbox()
+        from pathlib import Path
+
+        cache_dir = str(tmp_path / "cache")
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-no-rmi",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=cache_dir,
+        )
+        proj.up()
+        proj.services["app"].run("echo ok")
+
+        cache_layers = Path(cache_dir) / "layers"
+        cached_before = set(cache_layers.iterdir()) if cache_layers.exists() else set()
+
+        proj.down()  # no rmi
+
+        cached_after = set(cache_layers.iterdir()) if cache_layers.exists() else set()
+        assert cached_after == cached_before
+
+    def test_down_volumes_false_keeps_volume_dirs(self, tmp_path):
+        """down(volumes=False) keeps named volume directories."""
+        self._skip_if_no_sandbox()
+
+        cache_dir = str(tmp_path / "cache")
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                volumes:
+                  - data:/data
+            volumes:
+              data:
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-keep-vol",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=cache_dir,
+        )
+        proj.up()
+        proj.services["app"].run("echo hello > /data/test.txt")
+
+        vol_dir = proj._volume_dir
+        assert vol_dir is not None and vol_dir.exists()
+
+        proj.down(volumes=False)
+
+        assert vol_dir.exists()
+        import shutil
+        shutil.rmtree(vol_dir, ignore_errors=True)
+
+
 class TestDetachMode:
     """Tests for up(detach=True) and health_status()/wait_healthy()."""
 

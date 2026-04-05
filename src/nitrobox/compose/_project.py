@@ -250,8 +250,30 @@ class ComposeProject:
         """
         self._wait_all_healthy(timeout)
 
-    def down(self) -> None:
-        """Stop and delete all sandboxes."""
+    def down(
+        self,
+        *,
+        rmi: str | None = None,
+        volumes: bool = True,
+        timeout: int | None = None,
+    ) -> None:
+        """Stop and delete all sandboxes.
+
+        Mirrors ``docker compose down`` options:
+
+        Args:
+            rmi: Remove cached rootfs layers for images used by this
+                project.  ``"all"`` removes both pulled and built images.
+                ``"local"`` removes only locally-built images (those
+                without a registry prefix).  ``None`` (default) keeps
+                all cached layers.
+            volumes: Remove named volume directories.  Default ``True``
+                (matches current behavior).
+            timeout: Shutdown timeout in seconds.  When set, each
+                service gets this long to handle its ``stop_signal``
+                before being killed.  ``None`` uses the service's
+                ``stop_grace_period`` or 10 s default.
+        """
         # Stop health monitors first
         for mon in self._health_monitors.values():
             mon.stop()
@@ -265,15 +287,18 @@ class ComposeProject:
                 handle = self._bg_handles.pop(name, None)
                 svc = self._defs.get(name)
                 if handle and svc and svc.stop_signal:
+                    grace = timeout
+                    if grace is None:
+                        grace = (
+                            int(_parse_duration(svc.stop_grace_period))
+                            if svc.stop_grace_period else 10
+                        )
                     try:
                         box.run(
                             f"kill -{svc.stop_signal} $(cat /tmp/.bg_{handle}.pid) 2>/dev/null || true"
                         )
                         import time
-                        time.sleep(
-                            _parse_duration(svc.stop_grace_period)
-                            if svc.stop_grace_period else 10
-                        )
+                        time.sleep(grace)
                     except Exception:
                         pass
                 try:
@@ -290,12 +315,57 @@ class ComposeProject:
         self._shared_nets.clear()
 
         # Clean up named volume directories
-        if self._volume_dir and self._volume_dir.exists():
+        if volumes and self._volume_dir and self._volume_dir.exists():
             import shutil
             shutil.rmtree(self._volume_dir, ignore_errors=True)
             self._volume_dir = None
 
+        # Remove cached rootfs layers (mirrors docker compose down --rmi)
+        if rmi is not None:
+            self._remove_image_cache(rmi)
+
         logger.info("ComposeProject %s: all services stopped", self._project_name)
+
+    def _remove_image_cache(self, mode: str) -> None:
+        """Remove cached rootfs layers for images used by this project.
+
+        Mirrors ``docker compose down --rmi``:
+
+        - ``"all"``: remove layers for all images (pulled + built).
+        - ``"local"``: remove layers only for locally-built images
+          (those without a ``/`` in the name, i.e. no registry prefix).
+        """
+        from nitrobox.image.store import _safe_cache_key
+        from pathlib import Path
+        import shutil
+
+        # Resolve cache dir from the same config used during sandbox creation.
+        rootfs_cache = self._rootfs_cache_dir
+        if not rootfs_cache:
+            xdg = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
+            rootfs_cache = os.path.join(xdg, "nitrobox", "rootfs")
+        layers_dir = Path(rootfs_cache) / "layers"
+        if not layers_dir.exists():
+            return
+
+        for name, image in self._image_map.items():
+            if mode == "local" and "/" in image:
+                continue  # skip registry images in "local" mode
+
+            try:
+                from nitrobox.image.store import _get_image_diff_ids
+                from nitrobox.image.layers import rmtree_mapped
+                diff_ids = _get_image_diff_ids(image)
+                for did in set(diff_ids):
+                    layer_dir = layers_dir / _safe_cache_key(did)
+                    if layer_dir.exists():
+                        # Layer dirs contain files with mapped UIDs from
+                        # user-namespace extraction — rmtree_mapped enters
+                        # a userns to delete them (same as Sandbox.delete).
+                        rmtree_mapped(layer_dir)
+                logger.debug("Removed cached layers for %s", image)
+            except Exception as e:
+                logger.debug("Could not clean cache for %s: %s", image, e)
 
     def reset(self) -> None:
         """Reset all sandboxes and restart service commands.
