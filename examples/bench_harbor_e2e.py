@@ -2,10 +2,7 @@
 """Benchmark: Harbor e2e — Docker vs nitrobox.
 
 Runs the same tasks with both environments using harbor's default
-settings, then compares wall-clock time, overhead, and correctness.
-
-No special cache warming or force-build — both environments start
-from the same state and let harbor handle image pulling/building.
+settings, then compares per-phase timing breakdown and correctness.
 
 Setup:
     cd harbor && uv sync --all-extras --dev
@@ -20,26 +17,11 @@ Usage:
         --agent oracle \
         --concurrency 4
 
-    # Concurrency sweep
+    # Specific tasks
     python examples/bench_harbor_e2e.py \
         --harbor-dir /path/to/harbor \
         --dataset terminal-bench@2.0 \
-        --agent oracle \
-        --concurrency 1,4,8
-
-    # Specific tasks only
-    python examples/bench_harbor_e2e.py \
-        --harbor-dir /path/to/harbor \
-        --dataset terminal-bench@2.0 \
-        --agent oracle \
         -i vulnerable-secret -i portfolio-optimization
-
-    # Claude agent
-    ANTHROPIC_API_KEY=sk-ant-... python examples/bench_harbor_e2e.py \
-        --harbor-dir /path/to/harbor \
-        --dataset terminal-bench@2.0 \
-        --agent claude-code --model anthropic/claude-sonnet-4-6 \
-        --concurrency 1,4
 """
 
 from __future__ import annotations
@@ -106,8 +88,18 @@ def run_harbor(
     return _parse_job_results(job_dir, wall_time)
 
 
+def _phase_seconds(data: dict, phase: str) -> float | None:
+    """Extract duration of a phase from trial result.json."""
+    timing = data.get(phase)
+    if not timing or not timing.get("started_at") or not timing.get("finished_at"):
+        return None
+    start = datetime.fromisoformat(timing["started_at"].rstrip("Z"))
+    end = datetime.fromisoformat(timing["finished_at"].rstrip("Z"))
+    return (end - start).total_seconds()
+
+
 def _parse_job_results(job_dir: Path, wall_time: float) -> dict:
-    """Parse trial results from a harbor job directory."""
+    """Parse trial results with full phase breakdown."""
     results = {
         "wall_time_s": wall_time,
         "trials": 0,
@@ -115,8 +107,10 @@ def _parse_job_results(job_dir: Path, wall_time: float) -> dict:
         "errors": 0,
         "phases": {
             "environment_setup": [],
+            "agent_setup": [],
             "agent_execution": [],
             "verifier": [],
+            "teardown": [],    # computed: total - sum(phases)
         },
     }
 
@@ -145,12 +139,28 @@ def _parse_job_results(job_dir: Path, wall_time: float) -> dict:
         if data.get("exception_info"):
             results["errors"] += 1
 
-        for phase in ["environment_setup", "agent_execution", "verifier"]:
-            timing = data.get(phase)
-            if timing and timing.get("started_at") and timing.get("finished_at"):
-                start = datetime.fromisoformat(timing["started_at"].rstrip("Z"))
-                end = datetime.fromisoformat(timing["finished_at"].rstrip("Z"))
-                results["phases"][phase].append((end - start).total_seconds())
+        # Extract all phase timings
+        env_setup = _phase_seconds(data, "environment_setup") or 0
+        agent_setup = _phase_seconds(data, "agent_setup") or 0
+        agent_exec = _phase_seconds(data, "agent_execution") or 0
+        verifier = _phase_seconds(data, "verifier") or 0
+
+        # Total trial time
+        trial_total = 0
+        if data.get("started_at") and data.get("finished_at"):
+            t0 = datetime.fromisoformat(data["started_at"].rstrip("Z"))
+            t1 = datetime.fromisoformat(data["finished_at"].rstrip("Z"))
+            trial_total = (t1 - t0).total_seconds()
+
+        # Teardown = total - recorded phases
+        recorded = env_setup + agent_setup + agent_exec + verifier
+        teardown = max(0, trial_total - recorded)
+
+        results["phases"]["environment_setup"].append(env_setup)
+        results["phases"]["agent_setup"].append(agent_setup)
+        results["phases"]["agent_execution"].append(agent_exec)
+        results["phases"]["verifier"].append(verifier)
+        results["phases"]["teardown"].append(teardown)
 
     return results
 
@@ -164,18 +174,18 @@ def _print_results(
     concurrency_levels: list[int],
     env_types: list[str],
 ) -> None:
-    """Print formatted results table and comparisons."""
-    # Table
+    """Print per-phase timing breakdown."""
+    # Phase breakdown table
     print(
         f"| {'C':>3} | {'Env':>8} | {'Wall':>7} | "
-        f"{'Setup':>7} | {'Agent':>7} | {'Verify':>7} | "
-        f"{'Overhead':>8} | {'Pass':>4} | {'Fail':>4} | {'Err':>4} |"
+        f"{'EnvSetup':>8} | {'AgtSetup':>8} | {'Agent':>7} | "
+        f"{'Verify':>7} | {'Teardown':>8} | "
+        f"{'Pass':>4} | {'Fail':>4} | {'Err':>4} |"
     )
-    print(
-        f"|{'-'*5}|{'-'*10}|{'-'*9}|"
-        f"{'-'*9}|{'-'*9}|{'-'*9}|"
-        f"{'-'*10}|{'-'*6}|{'-'*6}|{'-'*6}|"
-    )
+    print(f"|{'-' * 5}|{'-' * 10}|{'-' * 9}|"
+          f"{'-' * 10}|{'-' * 10}|{'-' * 9}|"
+          f"{'-' * 9}|{'-' * 10}|"
+          f"{'-' * 6}|{'-' * 6}|{'-' * 6}|")
 
     for c in concurrency_levels:
         for env_type in env_types:
@@ -185,20 +195,54 @@ def _print_results(
                 continue
 
             wall = r["wall_time_s"]
-            setup = _mean(r["phases"]["environment_setup"])
-            agent = _mean(r["phases"]["agent_execution"])
-            verify = _mean(r["phases"]["verifier"])
-            total_task = setup + agent + verify
-            overhead_pct = (setup / total_task * 100) if total_task > 0 else 0
+            env_s = _mean(r["phases"]["environment_setup"])
+            agt_s = _mean(r["phases"]["agent_setup"])
+            agt_x = _mean(r["phases"]["agent_execution"])
+            vfy = _mean(r["phases"]["verifier"])
+            tear = _mean(r["phases"]["teardown"])
             pass_n = r["rewards"].get("1.0", 0)
             fail_n = r["rewards"].get("0.0", 0)
             err_n = r["errors"]
 
             print(
                 f"| {c:>3} | {env_type:>8} | {wall:>6.1f}s | "
-                f"{setup:>6.1f}s | {agent:>6.1f}s | {verify:>6.1f}s | "
-                f"{overhead_pct:>7.1f}% | {pass_n:>4} | {fail_n:>4} | {err_n:>4} |"
+                f"{env_s:>7.1f}s | {agt_s:>7.1f}s | {agt_x:>6.1f}s | "
+                f"{vfy:>6.1f}s | {tear:>7.1f}s | "
+                f"{pass_n:>4} | {fail_n:>4} | {err_n:>4} |"
             )
+
+    # Per-phase overhead breakdown
+    print("\nPer-task breakdown (mean):")
+    for c in concurrency_levels:
+        for env_type in env_types:
+            key = f"{env_type}_c{c}"
+            r = all_results.get(key)
+            if not r or r["trials"] == 0:
+                continue
+
+            env_s = _mean(r["phases"]["environment_setup"])
+            agt_s = _mean(r["phases"]["agent_setup"])
+            agt_x = _mean(r["phases"]["agent_execution"])
+            vfy = _mean(r["phases"]["verifier"])
+            tear = _mean(r["phases"]["teardown"])
+            total = env_s + agt_s + agt_x + vfy + tear
+
+            if total <= 0:
+                continue
+
+            # Sandbox overhead = everything except agent_execution
+            sandbox_time = env_s + agt_s + vfy + tear
+            overhead_pct = sandbox_time / total * 100
+
+            print(f"  {env_type} c={c} (total {total:.1f}s, sandbox overhead {overhead_pct:.0f}%):")
+            for name, val in [
+                ("env_setup", env_s), ("agent_setup", agt_s),
+                ("agent_exec", agt_x), ("verifier", vfy),
+                ("teardown", tear),
+            ]:
+                pct = val / total * 100
+                bar = "#" * int(pct / 2)
+                print(f"    {name:>12}: {val:>6.1f}s ({pct:>5.1f}%) {bar}")
 
     # Speedup
     print("\nSpeedup (wall-clock):")
@@ -291,9 +335,9 @@ def main():
                 f"{r['errors']} errors"
             )
 
-    print("\n" + "=" * 80)
+    print("\n" + "=" * 100)
     print("RESULTS")
-    print("=" * 80 + "\n")
+    print("=" * 100 + "\n")
     _print_results(all_results, concurrency_levels, env_types)
 
     if args.output:
