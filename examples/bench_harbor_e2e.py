@@ -179,12 +179,12 @@ def _print_results(
     print(
         f"| {'C':>3} | {'Env':>8} | {'Wall':>7} | "
         f"{'EnvSetup':>8} | {'AgtSetup':>8} | {'Agent':>7} | "
-        f"{'Verify':>7} | {'Teardown':>8} | "
+        f"{'Verify':>7} | {'Teardown':>8} | {'Overhead':>8} | "
         f"{'Pass':>4} | {'Fail':>4} | {'Err':>4} |"
     )
     print(f"|{'-' * 5}|{'-' * 10}|{'-' * 9}|"
           f"{'-' * 10}|{'-' * 10}|{'-' * 9}|"
-          f"{'-' * 9}|{'-' * 10}|"
+          f"{'-' * 9}|{'-' * 10}|{'-' * 10}|"
           f"{'-' * 6}|{'-' * 6}|{'-' * 6}|")
 
     for c in concurrency_levels:
@@ -200,6 +200,8 @@ def _print_results(
             agt_x = _mean(r["phases"]["agent_execution"])
             vfy = _mean(r["phases"]["verifier"])
             tear = _mean(r["phases"]["teardown"])
+            total = env_s + agt_s + agt_x + vfy + tear
+            overhead_pct = (total - agt_x) / total * 100 if total > 0 else 0
             pass_n = r["rewards"].get("1.0", 0)
             fail_n = r["rewards"].get("0.0", 0)
             err_n = r["errors"]
@@ -207,7 +209,7 @@ def _print_results(
             print(
                 f"| {c:>3} | {env_type:>8} | {wall:>6.1f}s | "
                 f"{env_s:>7.1f}s | {agt_s:>7.1f}s | {agt_x:>6.1f}s | "
-                f"{vfy:>6.1f}s | {tear:>7.1f}s | "
+                f"{vfy:>6.1f}s | {tear:>7.1f}s | {overhead_pct:>7.0f}% | "
                 f"{pass_n:>4} | {fail_n:>4} | {err_n:>4} |"
             )
 
