@@ -104,24 +104,43 @@ Upstream PR open since 2026-02-25:
 
 ## Reproduce
 
-```bash
-# Prerequisites
-docker login   # required — 89 prebuilt images need Docker Hub access
+See [README.md](README.md) for full test plan. Quick commands:
 
-# Full TB2 comparison
+```bash
+docker login   # required — 89 prebuilt images
+
+# Correctness (oracle, all 89 tasks)
 python examples/bench_harbor_e2e.py \
     --harbor-dir /path/to/harbor \
     --dataset terminal-bench@2.0 \
-    --agent oracle \
-    --concurrency 4 \
-    --output tb2_results.json
+    --agent oracle --concurrency 4 \
+    --envs docker,nitrobox
+
+# Cold + warm start performance
+python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset terminal-bench@2.0 \
+    --agent oracle --concurrency 4 \
+    --envs docker,nitrobox --no-delete
+python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset terminal-bench@2.0 \
+    --agent oracle --concurrency 4 \
+    --envs docker,nitrobox
+
+# Real agent (LLM overhead)
+ANTHROPIC_API_KEY=sk-ant-... python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset terminal-bench@2.0 \
+    --agent terminus-2 --model anthropic/claude-sonnet-4-6 \
+    --n-tasks 3 --concurrency 1 \
+    --envs docker,nitrobox
 
 # Re-test a specific task
 python examples/bench_harbor_e2e.py \
     --harbor-dir /path/to/harbor \
     --dataset terminal-bench@2.0 \
-    --agent oracle \
-    -i <task-name>
+    --agent oracle -i <task-name>
 ```
 
 ## Notes

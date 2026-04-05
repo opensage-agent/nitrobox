@@ -1,8 +1,7 @@
 # Harbor Dataset Compatibility
 
 Tracking nitrobox compatibility with all Harbor-supported datasets.
-Each dataset is tested with the `oracle` agent against the Docker
-environment as baseline.
+Each dataset is tested against Docker as baseline.
 
 ## Status
 
@@ -29,65 +28,70 @@ environment as baseline.
 | mmau | — | — | Not tested | |
 | sldbench | — | — | Not tested | |
 
-## How to Run
+## Test Plan
 
-Use `examples/bench_harbor_e2e.py` — runs harbor with default settings
-for each environment and compares results:
+For each dataset, run three benchmarks:
+
+### 1. Correctness (oracle, cold start)
+
+Verifies nitrobox produces the same results as Docker on all tasks.
 
 ```bash
-# Prerequisites
+python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset <dataset>@<version> \
+    --agent oracle --concurrency 4 \
+    --envs docker,nitrobox
+```
+
+### 2. Performance (oracle, cold + warm start)
+
+Measures per-phase timing breakdown: env_setup, agent_exec, verifier,
+teardown. Run twice — first with `--no-delete` (cold, keeps caches),
+second without (warm, cleans up).
+
+```bash
+# Cold start — caches empty, --no-delete preserves them
+python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset <dataset>@<version> \
+    --agent oracle --concurrency 4 \
+    --envs docker,nitrobox --no-delete
+
+# Warm start — both sides have cached images/layers, --delete cleans up
+python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset <dataset>@<version> \
+    --agent oracle --concurrency 4 \
+    --envs docker,nitrobox
+```
+
+### 3. Real agent (LLM overhead)
+
+Measures sandbox overhead vs LLM inference time. The `llm_inference`
+field in the output shows actual API call time; `overhead` is
+everything else (env_setup + agent_setup + verifier + teardown +
+sandbox command execution).
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-... python examples/bench_harbor_e2e.py \
+    --harbor-dir /path/to/harbor \
+    --dataset <dataset>@<version> \
+    --agent terminus-2 \
+    --model anthropic/claude-sonnet-4-6 \
+    --n-tasks 3 --concurrency 1 \
+    --envs docker,nitrobox
+```
+
+## Prerequisites
+
+```bash
 cd harbor && uv sync --all-extras --dev
 pip install nitrobox
 docker login   # required to avoid Docker Hub rate limits
-
-# Cold start comparison (default --delete cleans up after)
-python examples/bench_harbor_e2e.py \
-    --harbor-dir /path/to/harbor \
-    --dataset terminal-bench@2.0 \
-    --agent oracle \
-    --concurrency 4 \
-    --envs docker,nitrobox
-
-# Cold + warm start comparison:
-#   1st run: cold start, --no-delete keeps caches
-#   2nd run: warm start, default --delete cleans up
-python examples/bench_harbor_e2e.py \
-    --harbor-dir /path/to/harbor \
-    --dataset terminal-bench@2.0 \
-    --agent oracle --concurrency 4 \
-    --envs docker,nitrobox --no-delete
-python examples/bench_harbor_e2e.py \
-    --harbor-dir /path/to/harbor \
-    --dataset terminal-bench@2.0 \
-    --agent oracle --concurrency 4 \
-    --envs docker,nitrobox
-
-# Real LLM agent (measures sandbox overhead vs inference time)
-ANTHROPIC_API_KEY=sk-ant-... python examples/bench_harbor_e2e.py \
-    --harbor-dir /path/to/harbor \
-    --dataset terminal-bench@2.0 \
-    --agent terminus-2 \
-    --model anthropic/claude-sonnet-4-6 \
-    --n-tasks 1 --concurrency 1 \
-    --envs docker,nitrobox
-
-# Specific tasks only
-python examples/bench_harbor_e2e.py \
-    --harbor-dir /path/to/harbor \
-    --dataset terminal-bench@2.0 \
-    --agent oracle \
-    -i vulnerable-secret -i portfolio-optimization
-
-# Concurrency sweep
-python examples/bench_harbor_e2e.py \
-    --harbor-dir /path/to/harbor \
-    --dataset terminal-bench@2.0 \
-    --agent oracle \
-    --concurrency 1,4,8 \
-    --output results.json
 ```
 
-## Clean State (for reproducible benchmarks)
+## Clean State
 
 ```bash
 # Nitrobox caches (may need docker for root-owned dirs)
@@ -98,7 +102,7 @@ rm -rf ~/.cache/nitrobox/rootfs/
 rm -rf ~/.cache/harbor/tasks/
 rm -rf /path/to/harbor/jobs/bench_*
 
-# Docker images (optional — forces re-pull)
+# Docker images
 docker images --format "{{.Repository}}:{{.Tag}}" | grep alexgshaw | xargs -r docker rmi -f
 ```
 
