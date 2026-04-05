@@ -144,17 +144,7 @@ def _parse_job_results(job_dir: Path, wall_time: float) -> dict:
         agent_setup = _phase_seconds(data, "agent_setup") or 0
         agent_exec = _phase_seconds(data, "agent_execution") or 0
         verifier = _phase_seconds(data, "verifier") or 0
-
-        # Total trial time
-        trial_total = 0
-        if data.get("started_at") and data.get("finished_at"):
-            t0 = datetime.fromisoformat(data["started_at"].rstrip("Z"))
-            t1 = datetime.fromisoformat(data["finished_at"].rstrip("Z"))
-            trial_total = (t1 - t0).total_seconds()
-
-        # Teardown = total - recorded phases
-        recorded = env_setup + agent_setup + agent_exec + verifier
-        teardown = max(0, trial_total - recorded)
+        teardown = _phase_seconds(data, "environment_teardown") or 0
 
         results["phases"]["environment_setup"].append(env_setup)
         results["phases"]["agent_setup"].append(agent_setup)
