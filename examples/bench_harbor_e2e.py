@@ -98,6 +98,7 @@ def run_harbor(
         "--n-attempts", "1",
         "-l", str(n_tasks),
         "--job-name", job_name,
+        "--force-build",
         "-y",
     ]
     if agent:
