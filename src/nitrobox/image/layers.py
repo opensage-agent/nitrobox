@@ -235,10 +235,15 @@ def prepare_rootfs_layers_from_docker(
         _write_manifest(cache_dir, image_name, diff_ids, image_config=img_config)
         return layer_dirs
 
-    # Need to extract missing layers
-    needed = {did for did, d in zip(diff_ids, layer_dirs) if not d.exists()}
+    # Need to extract missing layers.  Iterate over the deduplicated
+    # layer_dirs — NOT zip(diff_ids, layer_dirs) which misaligns when
+    # the image has duplicate diff-ids.
+    needed_keys = {d.name for d in layer_dirs if not d.exists()}
+    # Map cache keys back to full diff_ids for the registry downloader.
+    _key_to_did = {_safe_cache_key(did): did for did in diff_ids}
+    needed = {_key_to_did[k] for k in needed_keys if k in _key_to_did}
     logger.info("Extracting layers for %s (%d layers, %d cached)",
-                image_name, len(diff_ids), len(diff_ids) - len(needed))
+                image_name, len(diff_ids), len(layer_dirs) - len(needed))
 
     # Primary: local Docker cache (docker save — pure local IO, fastest)
     # Fallback: registry download (network, slower)
