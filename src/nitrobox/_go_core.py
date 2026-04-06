@@ -1,10 +1,11 @@
 """Go-based backend for nitrobox core operations.
 
-Drop-in replacement for the Rust _core extension module. Each function
-calls the `nitrobox-core` Go binary via subprocess with JSON stdin/stdout.
+Drop-in replacement for the Rust _core extension module. Uses in-process
+FFI via CFFI to call the Go c-shared library (libnitrobox.so), giving
+the same ~1μs call overhead as Rust pyo3.
 
-Functions that are Phase 2+ (security, namespace, spawn) raise
-NotImplementedError until those phases are implemented.
+Spawn is the exception — it uses subprocess because Go's c-shared library
+runs in the Python process, making fork unsafe (Go runtime is multi-threaded).
 """
 
 from __future__ import annotations
@@ -16,8 +17,115 @@ import threading
 from pathlib import Path
 from typing import Any
 
-# Locate the Go binary. Prefer an explicit env var, then check adjacent to
-# the Python package, then fall back to PATH.
+import cffi
+
+# ======================================================================
+# Library loading
+# ======================================================================
+
+_CDEF = """
+void NbxFree(char* p);
+
+// Mount
+int NbxCheckNewMountAPI(void);
+char* NbxMountOverlay(char* lowerdirSpec, char* upperDir, char* workDir, char* target);
+char* NbxBindMount(char* source, char* target);
+char* NbxRbindMount(char* source, char* target);
+char* NbxMakePrivate(char* target);
+char* NbxRemountROBind(char* target);
+char* NbxUmount(char* target);
+char* NbxUmountLazy(char* target);
+char* NbxUmountRecursiveLazy(char* target);
+
+// Cgroup
+int NbxCgroupV2Available(void);
+char* NbxCreateCgroup(char* name, char** outPath);
+char* NbxApplyCgroupLimits(char* cgroupPath, char* limitsJSON);
+char* NbxCgroupAddProcess(char* cgroupPath, unsigned int pid);
+char* NbxCleanupCgroup(char* cgroupPath);
+long unsigned int NbxConvertCPUShares(long unsigned int shares);
+
+// Pidfd
+int NbxPidfdOpen(int pid, int* outFd);
+int NbxPidfdSendSignal(int pfd, int sig);
+int NbxPidfdIsAlive(int pfd);
+int NbxProcessMadviseCold(int pfd);
+
+// Proc
+char* NbxFuserKill(char* targetPath, unsigned int* outCount);
+
+// QMP
+char* NbxQmpSend(char* socketPath, char* commandJSON, long unsigned int timeoutSecs, char** outResp);
+
+// Whiteout
+char* NbxConvertWhiteouts(char* layerDir, int useUserXattr, unsigned int* outCount);
+
+// Image ref
+char* NbxParseImageRef(char* image, char** outDomain, char** outRepo, char** outTag);
+
+// Security
+unsigned int NbxLandlockABIVersion(void);
+void NbxBuildSeccompBPF(void** outBuf, int* outLen);
+char* NbxApplySeccompFilter(void);
+char* NbxDropCapabilities(char* extraKeepJSON, char* extraDropJSON, unsigned int* outDropped);
+char* NbxApplyLandlock(char* readPathsJSON, char* writePathsJSON, char* portsJSON, int strict, int* outApplied);
+
+// Namespace
+char* NbxUsernFixupForDelete(int usernsPid, char* dirPath, unsigned int* outCount);
+char* NbxExtractTarInUserns(char* tarPath, char* dest, unsigned int outerUID, unsigned int outerGID, unsigned int subStart, unsigned int subCount);
+char* NbxRmtreeInUserns(char* path, unsigned int outerUID, unsigned int outerGID, unsigned int subStart, unsigned int subCount);
+"""
+
+_ffi = cffi.FFI()
+_ffi.cdef(_CDEF)
+
+# Find libnitrobox.so
+_SO_SEARCH = [
+    os.environ.get("NITROBOX_LIB", ""),
+    str(Path(__file__).resolve().parent.parent.parent / "go" / "libnitrobox.so"),
+]
+
+_lib = None
+_lib_lock = threading.Lock()
+
+
+def _get_lib():
+    global _lib
+    if _lib is None:
+        with _lib_lock:
+            if _lib is None:
+                for p in _SO_SEARCH:
+                    if p and os.path.isfile(p):
+                        _lib = _ffi.dlopen(p)
+                        # Set NITROBOX_CORE_BIN so Go's re-exec finds the binary
+                        # (in c-shared mode os.Executable() returns Python)
+                        _go_dir = str(Path(p).parent)
+                        _bin_path = os.path.join(_go_dir, "nitrobox-core")
+                        if os.path.isfile(_bin_path):
+                            os.environ["NITROBOX_CORE_BIN"] = _bin_path
+                        break
+                if _lib is None:
+                    raise RuntimeError("libnitrobox.so not found")
+    return _lib
+
+
+def _check_err(err_ptr):
+    """Check a returned char* error. Raises OSError if non-null, frees the string."""
+    if err_ptr != _ffi.NULL:
+        msg = _ffi.string(err_ptr).decode()
+        _get_lib().NbxFree(err_ptr)
+        raise OSError(msg)
+
+
+def _c(s: str):
+    """Convert Python str to C char*."""
+    return _ffi.new("char[]", s.encode())
+
+
+# ======================================================================
+# Subprocess helper (for spawn only)
+# ======================================================================
+
 _BIN_SEARCH = [
     os.environ.get("NITROBOX_CORE_BIN", ""),
     str(Path(__file__).resolve().parent.parent.parent / "go" / "nitrobox-core"),
@@ -28,7 +136,6 @@ def _find_bin() -> str:
     for p in _BIN_SEARCH:
         if p and os.path.isfile(p) and os.access(p, os.X_OK):
             return p
-    # Fall back to PATH
     return "nitrobox-core"
 
 
@@ -45,74 +152,49 @@ def _bin() -> str:
     return _BIN
 
 
-def _call(subcmd: str, payload: dict[str, Any] | None = None) -> Any:
-    """Call a nitrobox-core subcommand with JSON stdin, return parsed JSON stdout."""
-    inp = json.dumps(payload or {}).encode()
-    r = subprocess.run(
-        [_bin(), subcmd],
-        input=inp,
-        capture_output=True,
-        check=False,
-    )
-    if r.returncode != 0:
-        err = r.stderr.decode().strip()
-        raise OSError(f"nitrobox-core {subcmd} failed: {err}")
-    out = r.stdout.decode().strip()
-    if not out:
-        return None
-    return json.loads(out)
-
-
 # ======================================================================
 # Mount operations
 # ======================================================================
 
 
 def py_check_new_mount_api() -> bool:
-    return _call("check-new-mount-api")
+    return _get_lib().NbxCheckNewMountAPI() != 0
 
 
 def py_mount_overlay(
     lowerdir_spec: str, upper_dir: str, work_dir: str, target: str
 ) -> None:
-    _call(
-        "mount-overlay",
-        {
-            "lowerdir_spec": lowerdir_spec,
-            "upper_dir": upper_dir,
-            "work_dir": work_dir,
-            "target": target,
-            "extra_opts": [],
-        },
-    )
+    _check_err(_get_lib().NbxMountOverlay(
+        _c(lowerdir_spec), _c(upper_dir), _c(work_dir), _c(target),
+    ))
 
 
 def py_bind_mount(source: str, target: str) -> None:
-    _call("bind-mount", {"source": source, "target": target})
+    _check_err(_get_lib().NbxBindMount(_c(source), _c(target)))
 
 
 def py_rbind_mount(source: str, target: str) -> None:
-    _call("rbind-mount", {"source": source, "target": target})
+    _check_err(_get_lib().NbxRbindMount(_c(source), _c(target)))
 
 
 def py_make_private(target: str) -> None:
-    _call("make-private", {"target": target})
+    _check_err(_get_lib().NbxMakePrivate(_c(target)))
 
 
 def py_remount_ro_bind(target: str) -> None:
-    _call("remount-ro-bind", {"target": target})
+    _check_err(_get_lib().NbxRemountROBind(_c(target)))
 
 
 def py_umount(target: str) -> None:
-    _call("umount", {"target": target})
+    _check_err(_get_lib().NbxUmount(_c(target)))
 
 
 def py_umount_lazy(target: str) -> None:
-    _call("umount-lazy", {"target": target})
+    _check_err(_get_lib().NbxUmountLazy(_c(target)))
 
 
 def py_umount_recursive_lazy(target: str) -> None:
-    _call("umount-recursive-lazy", {"target": target})
+    _check_err(_get_lib().NbxUmountRecursiveLazy(_c(target)))
 
 
 # ======================================================================
@@ -121,27 +203,33 @@ def py_umount_recursive_lazy(target: str) -> None:
 
 
 def py_cgroup_v2_available() -> bool:
-    return _call("cgroup-v2-available")
+    return _get_lib().NbxCgroupV2Available() != 0
 
 
 def py_create_cgroup(name: str) -> str:
-    return _call("create-cgroup", {"name": name})
+    out = _ffi.new("char**")
+    _check_err(_get_lib().NbxCreateCgroup(_c(name), out))
+    result = _ffi.string(out[0]).decode()
+    _get_lib().NbxFree(out[0])
+    return result
 
 
 def py_apply_cgroup_limits(cgroup_path: str, limits: dict[str, str]) -> None:
-    _call("apply-cgroup-limits", {"cgroup_path": cgroup_path, "limits": limits})
+    _check_err(_get_lib().NbxApplyCgroupLimits(
+        _c(cgroup_path), _c(json.dumps(limits)),
+    ))
 
 
 def py_cgroup_add_process(cgroup_path: str, pid: int) -> None:
-    _call("cgroup-add-process", {"cgroup_path": cgroup_path, "pid": pid})
+    _check_err(_get_lib().NbxCgroupAddProcess(_c(cgroup_path), pid))
 
 
 def py_cleanup_cgroup(cgroup_path: str) -> None:
-    _call("cleanup-cgroup", {"cgroup_path": cgroup_path})
+    _check_err(_get_lib().NbxCleanupCgroup(_c(cgroup_path)))
 
 
 def py_convert_cpu_shares(shares: int) -> int:
-    return _call("convert-cpu-shares", {"shares": shares})
+    return _get_lib().NbxConvertCPUShares(shares)
 
 
 # ======================================================================
@@ -150,19 +238,22 @@ def py_convert_cpu_shares(shares: int) -> int:
 
 
 def py_pidfd_open(pid: int) -> int | None:
-    return _call("pidfd-open", {"pid": pid})
+    out = _ffi.new("int*")
+    if _get_lib().NbxPidfdOpen(pid, out) == 0:
+        return out[0]
+    return None
 
 
 def py_pidfd_send_signal(pidfd: int, sig: int) -> bool:
-    return _call("pidfd-send-signal", {"pidfd": pidfd, "sig": sig})
+    return _get_lib().NbxPidfdSendSignal(pidfd, sig) != 0
 
 
 def py_pidfd_is_alive(pidfd: int) -> bool:
-    return _call("pidfd-is-alive", {"pidfd": pidfd})
+    return _get_lib().NbxPidfdIsAlive(pidfd) != 0
 
 
 def py_process_madvise_cold(pidfd: int) -> bool:
-    return _call("process-madvise-cold", {"pidfd": pidfd})
+    return _get_lib().NbxProcessMadviseCold(pidfd) != 0
 
 
 # ======================================================================
@@ -171,7 +262,9 @@ def py_process_madvise_cold(pidfd: int) -> bool:
 
 
 def py_fuser_kill(target_path: str) -> int:
-    return _call("fuser-kill", {"target_path": target_path})
+    out = _ffi.new("unsigned int*")
+    _check_err(_get_lib().NbxFuserKill(_c(target_path), out))
+    return out[0]
 
 
 # ======================================================================
@@ -182,14 +275,13 @@ def py_fuser_kill(target_path: str) -> int:
 def py_qmp_send(
     socket_path: str, command_json: str, timeout_secs: int = 30
 ) -> str:
-    return _call(
-        "qmp-send",
-        {
-            "socket_path": socket_path,
-            "command_json": command_json,
-            "timeout_secs": timeout_secs,
-        },
-    )
+    out = _ffi.new("char**")
+    _check_err(_get_lib().NbxQmpSend(
+        _c(socket_path), _c(command_json), timeout_secs, out,
+    ))
+    result = _ffi.string(out[0]).decode()
+    _get_lib().NbxFree(out[0])
+    return result
 
 
 # ======================================================================
@@ -198,14 +290,15 @@ def py_qmp_send(
 
 
 def py_convert_whiteouts(layer_dir: str, use_user_xattr: bool = True) -> int:
-    return _call(
-        "convert-whiteouts",
-        {"layer_dir": layer_dir, "use_user_xattr": use_user_xattr},
-    )
+    out = _ffi.new("unsigned int*")
+    _check_err(_get_lib().NbxConvertWhiteouts(
+        _c(layer_dir), 1 if use_user_xattr else 0, out,
+    ))
+    return out[0]
 
 
 # ======================================================================
-# Image store (in-memory — Python-side for Go backend)
+# Image store (in-memory — Python-side)
 # ======================================================================
 
 _IMAGE_STORE: dict[str, str] = {}
@@ -218,7 +311,6 @@ def py_image_store_get(image_name: str) -> str | None:
 
 
 def py_image_store_put(image_name: str, config_json: str) -> None:
-    # Validate JSON first (Rust raises ValueError on invalid JSON)
     try:
         config = json.loads(config_json)
     except json.JSONDecodeError as e:
@@ -241,48 +333,53 @@ def py_image_store_clear() -> None:
 
 
 def py_parse_image_ref(image: str) -> tuple[str, str, str]:
-    result = _call("parse-image-ref", {"image": image})
-    return tuple(result)
+    d = _ffi.new("char**")
+    r = _ffi.new("char**")
+    t = _ffi.new("char**")
+    _check_err(_get_lib().NbxParseImageRef(_c(image), d, r, t))
+    result = (
+        _ffi.string(d[0]).decode(),
+        _ffi.string(r[0]).decode(),
+        _ffi.string(t[0]).decode(),
+    )
+    lib = _get_lib()
+    lib.NbxFree(d[0])
+    lib.NbxFree(r[0])
+    lib.NbxFree(t[0])
+    return result
 
 
 # ======================================================================
-# Landlock
+# Security
 # ======================================================================
 
 
 def py_landlock_abi_version() -> int:
-    return _call("landlock-abi-version")
-
-
-# ======================================================================
-# Security (Phase 2 — implemented)
-# ======================================================================
+    return _get_lib().NbxLandlockABIVersion()
 
 
 def py_build_seccomp_bpf() -> bytes:
-    """Generate seccomp BPF bytecode (raw bytes, not JSON)."""
-    r = subprocess.run(
-        [_bin(), "build-seccomp-bpf"],
-        capture_output=True,
-        check=False,
-    )
-    if r.returncode != 0:
-        raise OSError(f"build-seccomp-bpf failed: {r.stderr.decode().strip()}")
-    return r.stdout
+    buf = _ffi.new("void**")
+    length = _ffi.new("int*")
+    _get_lib().NbxBuildSeccompBPF(buf, length)
+    result = _ffi.buffer(buf[0], length[0])[:]
+    _get_lib().NbxFree(_ffi.cast("char*", buf[0]))
+    return result
 
 
 def py_apply_seccomp_filter() -> None:
-    _call("apply-seccomp-filter")
+    _check_err(_get_lib().NbxApplySeccompFilter())
 
 
 def py_drop_capabilities(
     extra_keep: list[int] | None = None,
     extra_drop: list[int] | None = None,
 ) -> int:
-    return _call(
-        "drop-capabilities",
-        {"extra_keep": extra_keep or [], "extra_drop": extra_drop or []},
-    )
+    out = _ffi.new("unsigned int*")
+    keep_json = _c(json.dumps(extra_keep or []))
+    drop_json = _c(json.dumps(extra_drop or []))
+    _check_err(_get_lib().NbxDropCapabilities(keep_json, drop_json, out))
+    return out[0]
 
 
 def py_apply_landlock(
@@ -291,35 +388,43 @@ def py_apply_landlock(
     allowed_tcp_ports: list[int] | None = None,
     strict: bool = False,
 ) -> bool:
-    return _call(
-        "apply-landlock",
-        {
-            "read_paths": read_paths or [],
-            "write_paths": write_paths or [],
-            "allowed_tcp_ports": allowed_tcp_ports or [],
-            "strict": strict,
-        },
-    )
+    out = _ffi.new("int*")
+    _check_err(_get_lib().NbxApplyLandlock(
+        _c(json.dumps(read_paths or [])),
+        _c(json.dumps(write_paths or [])),
+        _c(json.dumps(allowed_tcp_ports or [])),
+        1 if strict else 0,
+        out,
+    ))
+    return out[0] != 0
+
+
+# ======================================================================
+# Namespace operations
+# ======================================================================
 
 
 def py_nsenter_preexec(target_pid: int) -> None:
-    _call("nsenter-preexec", {"target_pid": target_pid})
+    # nsenter_preexec is called from Python's preexec_fn (after fork, before exec).
+    # Can't use CFFI here because Go runtime in the forked child is broken.
+    # This needs to be replaced with nsenter-exec subcommand in sandbox.popen().
+    raise NotImplementedError(
+        "py_nsenter_preexec not supported via FFI — use nsenter-exec subcommand"
+    )
 
 
 def py_userns_preexec(
     target_pid: int, rootfs: str, working_dir: str
 ) -> None:
-    _call(
-        "userns-preexec",
-        {"target_pid": target_pid, "rootfs": rootfs, "working_dir": working_dir},
+    raise NotImplementedError(
+        "py_userns_preexec not supported via FFI — use nsenter-exec subcommand"
     )
 
 
 def py_userns_fixup_for_delete(userns_pid: int, dir_path: str) -> int:
-    return _call(
-        "userns-fixup-for-delete",
-        {"userns_pid": userns_pid, "dir_path": dir_path},
-    )
+    out = _ffi.new("unsigned int*")
+    _check_err(_get_lib().NbxUsernFixupForDelete(userns_pid, _c(dir_path), out))
+    return out[0]
 
 
 def py_extract_tar_in_userns(
@@ -330,17 +435,9 @@ def py_extract_tar_in_userns(
     sub_start: int,
     sub_count: int,
 ) -> None:
-    _call(
-        "extract-tar-in-userns",
-        {
-            "tar_path": tar_path,
-            "dest": dest,
-            "outer_uid": outer_uid,
-            "outer_gid": outer_gid,
-            "sub_start": sub_start,
-            "sub_count": sub_count,
-        },
-    )
+    _check_err(_get_lib().NbxExtractTarInUserns(
+        _c(tar_path), _c(dest), outer_uid, outer_gid, sub_start, sub_count,
+    ))
 
 
 def py_rmtree_in_userns(
@@ -350,42 +447,28 @@ def py_rmtree_in_userns(
     sub_start: int,
     sub_count: int,
 ) -> None:
-    _call(
-        "rmtree-in-userns",
-        {
-            "path": path,
-            "outer_uid": outer_uid,
-            "outer_gid": outer_gid,
-            "sub_start": sub_start,
-            "sub_count": sub_count,
-        },
-    )
+    _check_err(_get_lib().NbxRmtreeInUserns(
+        _c(path), outer_uid, outer_gid, sub_start, sub_count,
+    ))
+
+
+# ======================================================================
+# Spawn — via subprocess (fork not safe in Go c-shared)
+# ======================================================================
 
 
 class PySpawnResult:
-    """Placeholder for Phase 4 spawn result."""
+    """Spawn result matching Rust PySpawnResult attributes."""
 
     __slots__ = (
-        "pid",
-        "stdin_fd",
-        "stdout_fd",
-        "signal_r_fd",
-        "signal_w_fd_num",
-        "master_fd",
-        "pidfd",
-        "err_r_fd",
+        "pid", "stdin_fd", "stdout_fd", "signal_r_fd",
+        "signal_w_fd_num", "master_fd", "pidfd", "err_r_fd",
     )
 
     def __init__(
-        self,
-        pid: int,
-        stdin_fd: int,
-        stdout_fd: int,
-        signal_r_fd: int,
-        signal_w_fd_num: int,
-        master_fd: int | None,
-        pidfd: int | None,
-        err_r_fd: int,
+        self, pid: int, stdin_fd: int, stdout_fd: int,
+        signal_r_fd: int, signal_w_fd_num: int,
+        master_fd: int | None, pidfd: int | None, err_r_fd: int,
     ) -> None:
         self.pid = pid
         self.stdin_fd = stdin_fd
@@ -398,21 +481,12 @@ class PySpawnResult:
 
 
 def py_spawn_sandbox(config: dict) -> PySpawnResult:
-    """Spawn a sandboxed shell via the Go binary.
-
-    Python creates pipes, passes them to Go via pass_fds. Go forks the
-    sandbox child which inherits those fds, then Go exits. The sandbox
-    shell (grandchild of Go) stays alive with pipes connected to Python.
-    """
-    # Create pipes in Python's process.
-    # O_CLOEXEC is set so they don't leak to other children.
-    # pass_fds in Popen automatically clears CLOEXEC for the Go subprocess.
+    """Spawn via subprocess (Go binary). Fork is not safe in c-shared mode."""
     stdin_r, stdin_w = os.pipe2(os.O_CLOEXEC)
     stdout_r, stdout_w = os.pipe2(os.O_CLOEXEC)
     signal_r, signal_w = os.pipe2(os.O_CLOEXEC)
     err_r, err_w = os.pipe2(os.O_CLOEXEC)
 
-    # Add pre-created fd numbers to config
     spawn_config = dict(config)
     spawn_config["pre_stdin_r"] = stdin_r
     spawn_config["pre_stdin_w"] = stdin_w
@@ -423,13 +497,12 @@ def py_spawn_sandbox(config: dict) -> PySpawnResult:
     spawn_config["pre_err_r"] = err_r
     spawn_config["pre_err_w"] = err_w
 
-    # Convert subuid_range tuple to list for JSON
     if "subuid_range" in spawn_config and spawn_config["subuid_range"] is not None:
         spawn_config["subuid_range"] = list(spawn_config["subuid_range"])
 
     pass_fds = (stdin_r, stdin_w, stdout_r, stdout_w, signal_r, signal_w, err_r, err_w)
-
     inp = json.dumps(spawn_config).encode()
+
     proc = subprocess.Popen(
         [_bin(), "spawn"],
         stdin=subprocess.PIPE,
@@ -439,7 +512,6 @@ def py_spawn_sandbox(config: dict) -> PySpawnResult:
     )
     go_stdout, go_stderr = proc.communicate(input=inp, timeout=30)
 
-    # Close fds that belong to the child side
     os.close(stdin_r)
     os.close(stdout_w)
     os.close(err_w)
@@ -450,8 +522,7 @@ def py_spawn_sandbox(config: dict) -> PySpawnResult:
                 os.close(fd)
             except OSError:
                 pass
-        err_msg = go_stderr.decode().strip()
-        raise OSError(f"nitrobox-core spawn failed: {err_msg}")
+        raise OSError(f"nitrobox-core spawn failed: {go_stderr.decode().strip()}")
 
     result = json.loads(go_stdout.decode().strip())
 

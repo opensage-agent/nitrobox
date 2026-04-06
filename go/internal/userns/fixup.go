@@ -4,56 +4,66 @@ package userns
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 
 	"golang.org/x/sys/unix"
 )
 
+// coreBinary returns the path to the nitrobox-core binary for re-exec.
+func coreBinary() string {
+	if p := os.Getenv("NITROBOX_CORE_BIN"); p != "" {
+		return p
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return "nitrobox-core"
+	}
+	return self
+}
+
 // FixupDirForDelete enters a user namespace and recursively chmod+chown
-// a directory so the host user can rmtree it. Returns 0 on success.
+// a directory so the host user can rmtree it. Uses re-exec pattern.
 func FixupDirForDelete(usernsPid int, dirPath string) (uint32, error) {
+	self := coreBinary()
+
+	cmd := exec.Command(self, "_fixup-worker")
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("_NBX_USERNS_PID=%d", usernsPid),
+		fmt.Sprintf("_NBX_DIR_PATH=%s", dirPath),
+	)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return 0, fmt.Errorf("userns fixup failed: %w", err)
+	}
+	return 0, nil
+}
+
+// FixupWorker is the re-exec entry point for fixup inside a user namespace.
+func FixupWorker() {
+	usernsPid := 0
+	fmt.Sscanf(os.Getenv("_NBX_USERNS_PID"), "%d", &usernsPid)
+	dirPath := os.Getenv("_NBX_DIR_PATH")
+
 	nsPath := fmt.Sprintf("/proc/%d/ns/user", usernsPid)
 	nsFd, err := unix.Open(nsPath, unix.O_RDONLY|unix.O_CLOEXEC, 0)
 	if err != nil {
-		return 0, err
+		fmt.Fprintf(os.Stderr, "open userns fd: %v\n", err)
+		os.Exit(1)
 	}
 
-	pid, _, errno := unix.Syscall(unix.SYS_FORK, 0, 0, 0)
-	if errno != 0 {
+	if err := unix.Setns(nsFd, unix.CLONE_NEWUSER); err != nil {
 		unix.Close(nsFd)
-		return 0, errno
+		fmt.Fprintf(os.Stderr, "setns: %v\n", err)
+		os.Exit(1)
 	}
-
-	if pid == 0 {
-		// Child — close inherited Popen stdio
-		devnull, _ := unix.Open("/dev/null", unix.O_WRONLY, 0)
-		if devnull >= 0 {
-			unix.Dup2(devnull, 1)
-			unix.Dup2(devnull, 2)
-			unix.Close(devnull)
-		}
-		if err := unix.Setns(nsFd, unix.CLONE_NEWUSER); err != nil {
-			unix.Exit(1)
-		}
-		unix.Close(nsFd)
-
-		walkFixup(dirPath)
-		unix.Exit(0)
-	}
-
-	// Parent
 	unix.Close(nsFd)
 
-	var ws unix.WaitStatus
-	_, err = unix.Wait4(int(pid), &ws, 0, nil)
-	if err != nil {
-		return 0, err
-	}
-	if ws.Exited() && ws.ExitStatus() == 0 {
-		return 0, nil
-	}
-	return 0, fmt.Errorf("userns fixup child exited with status %d", ws.ExitStatus())
+	walkFixup(dirPath)
+	os.Exit(0)
 }
 
 func walkFixup(dir string) {
@@ -74,10 +84,8 @@ func walkFixup(dir string) {
 }
 
 func fixupEntry(path string) {
-	// lchown to root:root
 	_ = unix.Lchown(path, 0, 0)
 
-	// chmod: dirs 0777, files 0666
 	var st unix.Stat_t
 	if unix.Lstat(path, &st) == nil {
 		mode := uint32(0o666)

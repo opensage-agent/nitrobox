@@ -630,6 +630,14 @@ func main() {
 		},
 	})
 
+	rootCmd.AddCommand(&cobra.Command{
+		Use:    "_fixup-worker",
+		Hidden: true,
+		Run: func(cmd *cobra.Command, args []string) {
+			userns.FixupWorker()
+		},
+	})
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

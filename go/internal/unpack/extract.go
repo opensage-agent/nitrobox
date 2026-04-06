@@ -22,7 +22,7 @@ const overflowID = 65534
 func ExtractTarInUserns(tarPath, dest string, outerUID, outerGID, subStart, subCount uint32) error {
 	// Re-exec self with a special subcommand that does the extraction.
 	// The child process is started with CLONE_NEWUSER via SysProcAttr.
-	self, _ := os.Executable()
+	self := coreBinary()
 
 	usernsPipeR, usernsPipeW, _ := os.Pipe()
 	goPipeR, goPipeW, _ := os.Pipe()
@@ -32,11 +32,11 @@ func ExtractTarInUserns(tarPath, dest string, outerUID, outerGID, subStart, subC
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.ExtraFiles = []*os.File{usernsPipeW, goPipeR} // fd 3 = usernsPipeW, fd 4 = goPipeR
-	cmd.Env = []string{
+	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("_NBX_TAR_PATH=%s", tarPath),
 		fmt.Sprintf("_NBX_DEST=%s", dest),
 		fmt.Sprintf("_NBX_MAX_ID=%d", subCount),
-	}
+	)
 	cmd.SysProcAttr = &unix.SysProcAttr{
 		Cloneflags: unix.CLONE_NEWUSER,
 	}
@@ -106,14 +106,14 @@ func ExtractWorker() {
 
 // RmtreeInUserns removes a directory tree containing files with mapped UIDs.
 func RmtreeInUserns(path string, outerUID, outerGID, subStart, subCount uint32) error {
-	self, _ := os.Executable()
+	self := coreBinary()
 
 	usernsPipeR, usernsPipeW, _ := os.Pipe()
 	goPipeR, goPipeW, _ := os.Pipe()
 
 	cmd := exec.Command(self, "_rmtree-worker")
 	cmd.ExtraFiles = []*os.File{usernsPipeW, goPipeR}
-	cmd.Env = []string{fmt.Sprintf("_NBX_RM_PATH=%s", path)}
+	cmd.Env = append(os.Environ(), fmt.Sprintf("_NBX_RM_PATH=%s", path))
 	cmd.SysProcAttr = &unix.SysProcAttr{
 		Cloneflags: unix.CLONE_NEWUSER,
 	}
@@ -139,6 +139,20 @@ func RmtreeInUserns(path string, outerUID, outerGID, subStart, subCount uint32) 
 
 	cmd.Wait()
 	return nil
+}
+
+// coreBinary returns the path to the nitrobox-core binary for re-exec.
+// In c-shared mode, os.Executable() returns the Python interpreter, so we
+// check NITROBOX_CORE_BIN env var first.
+func coreBinary() string {
+	if p := os.Getenv("NITROBOX_CORE_BIN"); p != "" {
+		return p
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return "nitrobox-core"
+	}
+	return self
 }
 
 // closeInheritedStdio redirects stdout/stderr to /dev/null in forked children.
