@@ -255,24 +255,34 @@ def py_landlock_abi_version() -> int:
 
 
 # ======================================================================
-# Phase 2+ stubs (security, namespace, spawn)
-# These will be implemented when the Go binary gains those subcommands.
+# Security (Phase 2 — implemented)
 # ======================================================================
 
 
 def py_build_seccomp_bpf() -> bytes:
-    raise NotImplementedError("py_build_seccomp_bpf: Phase 2 (security)")
+    """Generate seccomp BPF bytecode (raw bytes, not JSON)."""
+    r = subprocess.run(
+        [_bin(), "build-seccomp-bpf"],
+        capture_output=True,
+        check=False,
+    )
+    if r.returncode != 0:
+        raise OSError(f"build-seccomp-bpf failed: {r.stderr.decode().strip()}")
+    return r.stdout
 
 
 def py_apply_seccomp_filter() -> None:
-    raise NotImplementedError("py_apply_seccomp_filter: Phase 2 (security)")
+    _call("apply-seccomp-filter")
 
 
 def py_drop_capabilities(
     extra_keep: list[int] | None = None,
     extra_drop: list[int] | None = None,
 ) -> int:
-    raise NotImplementedError("py_drop_capabilities: Phase 2 (security)")
+    return _call(
+        "drop-capabilities",
+        {"extra_keep": extra_keep or [], "extra_drop": extra_drop or []},
+    )
 
 
 def py_apply_landlock(
@@ -281,7 +291,15 @@ def py_apply_landlock(
     allowed_tcp_ports: list[int] | None = None,
     strict: bool = False,
 ) -> bool:
-    raise NotImplementedError("py_apply_landlock: Phase 2 (security)")
+    return _call(
+        "apply-landlock",
+        {
+            "read_paths": read_paths or [],
+            "write_paths": write_paths or [],
+            "allowed_tcp_ports": allowed_tcp_ports or [],
+            "strict": strict,
+        },
+    )
 
 
 def py_nsenter_preexec(target_pid: int) -> None:

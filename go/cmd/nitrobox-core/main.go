@@ -13,9 +13,9 @@ import (
 	"github.com/nichochar/nitrobox/go/internal/pidfd"
 	"github.com/nichochar/nitrobox/go/internal/proc"
 	"github.com/nichochar/nitrobox/go/internal/qmp"
+	"github.com/nichochar/nitrobox/go/internal/security"
 	"github.com/nichochar/nitrobox/go/internal/whiteout"
 	"github.com/spf13/cobra"
-	"golang.org/x/sys/unix"
 )
 
 func main() {
@@ -384,13 +384,71 @@ func main() {
 		},
 	})
 
-	// --- landlock ---
+	// --- security ---
 	rootCmd.AddCommand(&cobra.Command{
 		Use:   "landlock-abi-version",
 		Short: "Get Landlock ABI version",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ver := landlockABIVersion()
-			return writeJSON(ver)
+			return writeJSON(security.LandlockABIVersion())
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "build-seccomp-bpf",
+		Short: "Generate seccomp BPF bytecode",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			bpf := security.BuildSeccompBPF()
+			// Write raw bytes to stdout (not JSON)
+			_, err := os.Stdout.Write(bpf)
+			return err
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "apply-seccomp-filter",
+		Short: "Install seccomp-bpf filter",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return security.ApplySeccompFilter()
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "drop-capabilities",
+		Short: "Drop capabilities from bounding set",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				ExtraKeep []uint32 `json:"extra_keep"`
+				ExtraDrop []uint32 `json:"extra_drop"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			dropped, err := security.DropCapabilities(req.ExtraKeep, req.ExtraDrop)
+			if err != nil {
+				return err
+			}
+			return writeJSON(dropped)
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "apply-landlock",
+		Short: "Apply Landlock filesystem/network restrictions",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				ReadPaths       []string `json:"read_paths"`
+				WritePaths      []string `json:"write_paths"`
+				AllowedTCPPorts []uint16 `json:"allowed_tcp_ports"`
+				Strict          bool     `json:"strict"`
+			}
+			if err := readJSON(&req); err != nil {
+				return err
+			}
+			applied, err := security.ApplyLandlock(req.ReadPaths, req.WritePaths, req.AllowedTCPPorts, req.Strict)
+			if err != nil {
+				return err
+			}
+			return writeJSON(applied)
 		},
 	})
 
@@ -408,21 +466,6 @@ func readJSON(v any) error {
 // writeJSON writes JSON to stdout.
 func writeJSON(v any) error {
 	return json.NewEncoder(os.Stdout).Encode(v)
-}
-
-// landlockABIVersion returns the Landlock ABI version (0 if unsupported).
-// Uses raw syscall since x/sys doesn't wrap landlock_create_ruleset.
-func landlockABIVersion() uint32 {
-	// SYS_LANDLOCK_CREATE_RULESET = 444 on x86_64
-	const sysLandlockCreateRuleset = 444
-	const landlockCreateRulesetVersion = 1 << 0
-
-	r1, _, errno := unix.Syscall(sysLandlockCreateRuleset, 0, 0, landlockCreateRulesetVersion)
-	if errno != 0 {
-		return 0
-	}
-	unix.Close(int(r1))
-	return uint32(r1)
 }
 
 // Ensure imports are used.
