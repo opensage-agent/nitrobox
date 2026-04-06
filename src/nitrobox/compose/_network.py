@@ -212,7 +212,9 @@ class SharedNetwork:
         for attempt in range(3):
             try:
                 result = subprocess.run(
-                    ["nsenter", f"--net=/proc/{sentinel_pid}/ns/net",
+                    ["nsenter",
+                     f"--user=/proc/{sentinel_pid}/ns/user",
+                     f"--net=/proc/{sentinel_pid}/ns/net",
                      "python3", "-c",
                      f"import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); "
                      f"s.settimeout(0.5); s.sendto({query!r},('{dns_ip}',53)); "
