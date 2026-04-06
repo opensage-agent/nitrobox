@@ -1,4 +1,4 @@
-"""Tests for Rust core bindings: mount, nsenter, fuser."""
+"""Tests for core bindings: mount, fuser."""
 
 from __future__ import annotations
 
@@ -14,13 +14,11 @@ from nitrobox._backend import (
     py_bind_mount,
     py_fuser_kill,
     py_make_private,
-    py_nsenter_preexec,
     py_rbind_mount,
     py_remount_ro_bind,
     py_umount,
     py_umount_lazy,
     py_umount_recursive_lazy,
-    py_userns_preexec,
 )
 
 
@@ -196,76 +194,6 @@ class TestRecursiveUmount:
 #  Namespace enter (preexec helpers)                                   #
 # ================================================================== #
 
-
-class TestNsenterPreexec:
-    """Rootful nsenter preexec — enters mount namespace + chroot."""
-
-    def test_rootful_popen_preexec(self, tmp_path):
-        """py_nsenter_preexec works in a Popen preexec_fn."""
-        _requires_root()
-
-        # Create a sandbox-like environment: unshare mount+pid, chroot.
-        rootfs = tmp_path / "rootfs"
-        rootfs.mkdir()
-        (rootfs / "bin").mkdir()
-        # Use a static busybox or just test with /bin/sh from host
-        # We'll create a minimal rootfs by bind-mounting /
-        py_bind_mount("/", str(rootfs))
-        try:
-            # Start a process in a new mount namespace
-            sentinel = subprocess.Popen(
-                ["unshare", "--mount", "--fork", "--", "sleep", "infinity"],
-                start_new_session=True,
-            )
-            time.sleep(0.3)  # Wait for namespace setup
-
-            try:
-                pid = sentinel.pid
-
-                def _preexec():
-                    py_nsenter_preexec(pid)
-
-                proc = subprocess.Popen(
-                    ["cat", "/etc/hostname"],
-                    preexec_fn=_preexec,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                stdout, _ = proc.communicate(timeout=5)
-                # Should succeed (can read /etc/hostname from target's mount ns)
-                assert proc.returncode == 0
-            finally:
-                sentinel.kill()
-                sentinel.wait()
-        finally:
-            py_umount_lazy(str(rootfs))
-
-
-class TestNsenterErrors:
-    """Error paths for nsenter preexec helpers."""
-
-    def test_nsenter_dead_pid_raises(self):
-        """nsenter_preexec with a dead process raises OSError."""
-        _requires_root()
-        # Fork and immediately reap so PID is gone.
-        pid = os.fork()
-        if pid == 0:
-            os._exit(0)
-        os.waitpid(pid, 0)
-
-        with pytest.raises(OSError):
-            py_nsenter_preexec(pid)
-
-    def test_nsenter_invalid_pid_raises(self):
-        """nsenter_preexec with a nonexistent PID raises OSError."""
-        _requires_root()
-        with pytest.raises(OSError):
-            py_nsenter_preexec(999999999)
-
-    def test_userns_preexec_invalid_pid_raises(self):
-        """userns_preexec with a nonexistent PID raises OSError."""
-        with pytest.raises(OSError):
-            py_userns_preexec(999999999, "/", "/")
 
 
 # ================================================================== #

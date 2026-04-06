@@ -311,52 +311,48 @@ class Sandbox:
     ) -> subprocess.Popen[Any]:
         """Start an interactive process inside the sandbox with stdio pipes.
 
+        Uses ``nitrobox-core nsenter-exec`` to enter the sandbox's namespace
+        and exec the command. This avoids ``preexec_fn`` which is incompatible
+        with the Go c-shared library (Go runtime breaks after fork).
+
         Returns a :class:`subprocess.Popen` object with direct
         ``stdin``/``stdout``/``stderr`` pipes for bidirectional communication.
         """
         if isinstance(command, list):
             cmd_args = command
         else:
-            cmd_args = ["bash", "-c", command]
+            cmd_args = ["sh", "-c", command]
 
         shell_pid = self._persistent_shell.pid
+        core_bin = os.environ.get("NITROBOX_CORE_BIN")
+        if not core_bin:
+            # Find nitrobox-core binary relative to the package
+            candidate = Path(__file__).resolve().parent.parent.parent / "go" / "nitrobox-core"
+            core_bin = str(candidate) if candidate.is_file() else "nitrobox-core"
 
+        # Use nitrobox-core with CGO constructor for namespace entry.
+        # The C constructor runs before Go's multi-threaded runtime starts,
+        # so it can do setns(CLONE_NEWUSER) (requires single-threaded caller).
+        # Same approach as runc's nsexec(). Triggered by _NITROBOX_NSENTER env var.
+        nsenter_env = dict(self._cached_env or {})
+        nsenter_env["_NITROBOX_NSENTER"] = str(shell_pid)
+        # Encode command args with newline separator (C constructor splits on \n)
+        nsenter_env["_NITROBOX_NSENTER_CMD"] = "\n".join(cmd_args)
         if self._userns:
-            from nitrobox._backend import py_userns_preexec
-
-            _shell_pid = shell_pid
-            _rootfs = str(self._rootfs)
-            _wd = self._config.working_dir or "/"
-
-            def _userns_preexec() -> None:
-                py_userns_preexec(_shell_pid, _rootfs, _wd)
-
-            defaults: dict[str, Any] = {
-                "stdin": subprocess.PIPE,
-                "stdout": subprocess.PIPE,
-                "stderr": subprocess.PIPE,
-                "env": self._cached_env,
-            }
-            defaults.update(kwargs)
-            proc = subprocess.Popen(cmd_args, preexec_fn=_userns_preexec, **defaults)
+            nsenter_env["_NITROBOX_NSENTER_ROOTFS"] = str(self._rootfs)
+            nsenter_env["_NITROBOX_NSENTER_WORKDIR"] = self._config.working_dir or "/"
         else:
-            from nitrobox._backend import py_nsenter_preexec
+            nsenter_env["_NITROBOX_NSENTER_MODE"] = "rootful"
+        nsenter_cmd = [core_bin]
 
-            _shell_pid = shell_pid
-
-            def _rootful_preexec() -> None:
-                py_nsenter_preexec(_shell_pid)
-
-            defaults: dict[str, Any] = {
-                "stdin": subprocess.PIPE,
-                "stdout": subprocess.PIPE,
-                "stderr": subprocess.PIPE,
-                "env": self._cached_env,
-            }
-            defaults.update(kwargs)
-            proc = subprocess.Popen(
-                cmd_args, preexec_fn=_rootful_preexec, **defaults
-            )
+        defaults: dict[str, Any] = {
+            "stdin": subprocess.PIPE,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "env": nsenter_env,
+        }
+        defaults.update(kwargs)
+        proc = subprocess.Popen(nsenter_cmd, **defaults)
 
         logger.debug("popen pid=%d in sandbox: %s", proc.pid, cmd_args)
         return proc

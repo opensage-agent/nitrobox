@@ -28,10 +28,13 @@ func coreBinary() string {
 func FixupDirForDelete(usernsPid int, dirPath string) (uint32, error) {
 	self := coreBinary()
 
-	cmd := exec.Command(self, "_fixup-worker")
+	// Use CGO constructor to enter the user namespace (single-threaded,
+	// before Go runtime). Then exec chmod+chown to fix permissions.
+	cmd := exec.Command(self)
 	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("_NBX_USERNS_PID=%d", usernsPid),
-		fmt.Sprintf("_NBX_DIR_PATH=%s", dirPath),
+		fmt.Sprintf("_NITROBOX_NSENTER=%d", usernsPid),
+		"_NITROBOX_NSENTER_ROOTFS=",  // empty = don't chroot, just setns user+mount
+		fmt.Sprintf("_NITROBOX_NSENTER_CMD=sh\n-c\nchmod -R a+rwX %s 2>/dev/null; chown -R 0:0 %s 2>/dev/null; true", dirPath, dirPath),
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr

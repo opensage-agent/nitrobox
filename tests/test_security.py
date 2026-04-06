@@ -2535,32 +2535,23 @@ class TestConcurrentSharedLayers:
     def _skip_if_no_docker_or_root(self):
         if os.geteuid() == 0:
             pytest.skip("concurrent layer tests run as non-root")
-        _requires_docker()
 
     def test_concurrent_sandboxes_shared_layers(self, tmp_path, shared_cache_dir):
-        """Start 4 sandboxes concurrently from images that share base layers."""
+        """Start 4 sandboxes concurrently from the same image (shared layers)."""
         import concurrent.futures
 
-        # Use the same base image with different names to simulate
-        # shared layers.  TEST_IMAGE is pulled once; we tag it 4 times
-        # to create 4 "different" images that share all layers.
-        tags = [f"concurrent-test-{i}:latest" for i in range(4)]
-        for tag in tags:
-            subprocess.run(
-                ["docker", "tag", TEST_IMAGE, tag],
-                capture_output=True, check=True,
-            )
-
+        # All 4 sandboxes use the same image — layers are shared via
+        # containers/storage's zero-copy diff paths.
         sandboxes = []
         try:
             configs = [
                 SandboxConfig(
-                    image=tag,
+                    image=TEST_IMAGE,
                     working_dir="/workspace",
                     env_base_dir=str(tmp_path / f"env-{i}"),
                     rootfs_cache_dir=shared_cache_dir,
                 )
-                for i, tag in enumerate(tags)
+                for i in range(4)
             ]
 
             # Start all 4 in parallel threads
@@ -2595,30 +2586,19 @@ class TestConcurrentSharedLayers:
                     box.delete()
                 except Exception:
                     pass
-            for tag in tags:
-                subprocess.run(["docker", "rmi", tag], capture_output=True)
 
     def test_delete_during_concurrent_use(self, tmp_path, shared_cache_dir):
         """Deleting one sandbox doesn't break another using shared layers."""
-        import concurrent.futures
-
-        tags = [f"del-test-{i}:latest" for i in range(2)]
-        for tag in tags:
-            subprocess.run(
-                ["docker", "tag", TEST_IMAGE, tag],
-                capture_output=True, check=True,
-            )
-
         sandboxes = []
         try:
             configs = [
                 SandboxConfig(
-                    image=tag,
+                    image=TEST_IMAGE,
                     working_dir="/workspace",
                     env_base_dir=str(tmp_path / f"del-env-{i}"),
                     rootfs_cache_dir=shared_cache_dir,
                 )
-                for i, tag in enumerate(tags)
+                for i in range(2)
             ]
 
             # Start both
@@ -2644,5 +2624,3 @@ class TestConcurrentSharedLayers:
                     box.delete()
                 except Exception:
                     pass
-            for tag in tags:
-                subprocess.run(["docker", "rmi", tag], capture_output=True)

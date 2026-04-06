@@ -2027,23 +2027,19 @@ class TestRegistry:
         cfg = get_image_metadata_from_registry("python:3.11-slim")
         assert cfg["cmd"] == ["python3"]
 
-    def test_registry_fallback_layers(self, tmp_path):
-        """Layer extraction works via registry API directly."""
+    def test_registry_pull_to_storage(self, tmp_path):
+        """Image pull via containers/storage works."""
         _skip_if_no_registry()
-        import nitrobox.rootfs as rf
+        from nitrobox.image.layers import (
+            _containers_storage_pull,
+            _try_containers_storage,
+        )
 
-        from nitrobox._registry import get_image_metadata_from_registry
-        metadata = get_image_metadata_from_registry("ubuntu:22.04")
-        diff_ids = metadata["diff_ids"]
-
-        layers_dir = tmp_path / "cache" / "layers"
-        layers_dir.mkdir(parents=True, exist_ok=True)
-        needed = set(diff_ids)
-        rf._extract_layers_from_registry("ubuntu:22.04", needed, layers_dir)
-
-        layer_dirs = [layers_dir / rf._safe_cache_key(d) for d in diff_ids]
-        assert len(layer_dirs) >= 1
-        assert (layer_dirs[0] / "bin").exists() or (layer_dirs[0] / "usr").exists()
+        # alpine should already be in the store from earlier tests
+        layers = _try_containers_storage("docker.io/library/alpine:latest")
+        assert layers is not None
+        assert len(layers) >= 1
+        assert (layers[0] / "bin").exists()
 
 
 # ------------------------------------------------------------------ #
