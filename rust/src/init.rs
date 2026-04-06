@@ -202,7 +202,13 @@ fn mount_overlay_fs(config: &SandboxSpawnConfig) -> io::Result<()> {
     Ok(())
 }
 
-fn mount_proc(rootfs: &str, net_isolate: bool, vm_mode: bool, host_sys: Option<&str>) {
+fn mount_proc(
+    rootfs: &str,
+    net_isolate: bool,
+    vm_mode: bool,
+    host_sys: Option<&str>,
+    cgroup_path: Option<&str>,
+) {
     let proc_path = format!("{rootfs}/proc");
     let _ = std::fs::create_dir_all(&proc_path);
     if let Err(e) = mnt(
@@ -256,6 +262,36 @@ fn mount_proc(rootfs: &str, net_isolate: bool, vm_mode: bool, host_sys: Option<&
                     None,
                 );
             }
+        }
+    }
+
+    // Cgroup namespace: bind-mount the sandbox's cgroup path to /sys/fs/cgroup
+    // so tools inside (joblib, nproc-like) see cpu.max, memory.max etc.
+    // Matches runc: rootfs_linux.go mountCgroupV2() with cgroupns.
+    if let Some(cg) = cgroup_path {
+        let cg_target = format!("{rootfs}/sys/fs/cgroup");
+        let _ = std::fs::create_dir_all(&cg_target);
+        if mnt(
+            Some(cg),
+            &cg_target,
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None,
+        )
+        .is_ok()
+        {
+            let _ = mnt(
+                None::<&str>,
+                &cg_target,
+                None::<&str>,
+                MsFlags::MS_BIND
+                    | MsFlags::MS_REMOUNT
+                    | MsFlags::MS_RDONLY
+                    | MsFlags::MS_NOSUID
+                    | MsFlags::MS_NODEV
+                    | MsFlags::MS_NOEXEC,
+                None,
+            );
         }
     }
 
@@ -1140,6 +1176,13 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
             if config.net_isolate && config.net_ns.is_none() && config.shared_userns.is_none() {
                 ns_flags |= CloneFlags::CLONE_NEWNET;
             }
+            // Cgroup namespace: lets the sandbox see its own cgroup as root.
+            // Without this, /sys/fs/cgroup inside the sandbox shows the host
+            // cgroup tree, and tools like joblib can't read cpu.max to detect
+            // the actual CPU limit.  Matches Docker's CLONE_NEWCGROUP.
+            if config.cgroup_path.is_some() {
+                ns_flags |= CloneFlags::CLONE_NEWCGROUP;
+            }
 
             if let Err(e) = nix::sched::unshare(ns_flags) {
                 init_fatal(err_w, &format!("unshare failed: {e}"));
@@ -1376,6 +1419,7 @@ fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
             config.net_isolate,
             config.vm_mode,
             Some("/.pivot_old/sys"),
+            config.cgroup_path.as_deref(),
         );
         setup_dev_rootful("/");
         mount_shm("/", config.shm_size);
@@ -1407,7 +1451,13 @@ fn child_init(config: &SandboxSpawnConfig, signal_w: RawFd, err_w: RawFd) -> ! {
         if config.read_only {
             make_rootfs_readonly(&config.rootfs);
         }
-        mount_proc(&config.rootfs, config.net_isolate, config.vm_mode, None);
+        mount_proc(
+            &config.rootfs,
+            config.net_isolate,
+            config.vm_mode,
+            None,
+            config.cgroup_path.as_deref(),
+        );
         setup_dev_rootless(&config.rootfs);
         mount_shm(&config.rootfs, config.shm_size);
         mount_devices(&config.rootfs, &config.devices);
