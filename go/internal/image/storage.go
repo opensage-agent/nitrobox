@@ -182,12 +182,13 @@ func BuildImage(store storage.Store, dockerfile, contextDir, tag string) (string
 		Output:                 tag,
 		ContextDirectory:       contextDir,
 		CommonBuildOpts:        &define.CommonBuildOptions{},
-		Layers:                 true,
+		Layers:                 false, // avoid intermediate commits that trigger broken pipe
 		RemoveIntermediateCtrs: true,
-		// IsolationChroot: RUN instructions execute in a chroot, inheriting
-		// host networking directly. No netavark/pasta/CNI needed for builds.
-		// Network isolation is handled at sandbox runtime (by pasta), not build time.
-		Isolation: define.IsolationChroot,
+		// IsolationOCIRootless: uses runc for proper rootless container execution.
+		// This is what podman uses for rootless builds.
+		Isolation: define.IsolationOCIRootless,
+		Out:       os.Stdout,
+		Err:       os.Stderr,
 	}
 
 	imageID, _, err := imagebuildah.BuildDockerfiles(ctx, store, opts, dockerfile)

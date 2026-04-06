@@ -320,6 +320,7 @@ def _containers_storage_pull(image_name: str) -> bool:
         os.close(go_w)
         os.close(json_w)
         import ctypes
+        os.environ["_CONTAINERS_ROOTLESS_UID"] = str(outer_uid)
         libc = ctypes.CDLL("libc.so.6", use_errno=True)
         if libc.unshare(0x10000000) != 0:
             os._exit(1)

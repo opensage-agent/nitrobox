@@ -450,27 +450,22 @@ class ComposeProject:
 
     @staticmethod
     def _buildah_build(context: str, dockerfile: str, tag: str) -> None:
-        """Build an image using buildah via nitrobox-core (no Docker daemon)."""
+        """Build an image using buildah via nitrobox-core (no Docker daemon).
+
+        nitrobox-core image-build uses MaybeReexecUsingUserNamespace() internally
+        (same as podman) to handle userns, UID mapping, and overlay permissions.
+        No manual fork+unshare needed from Python.
+        """
         import json as _json
         import subprocess as _sp
+        from pathlib import Path
 
         bin_path = os.environ.get("NITROBOX_CORE_BIN", "")
         if not bin_path:
-            from pathlib import Path
             candidate = Path(__file__).resolve().parent.parent.parent.parent / "go" / "nitrobox-core"
             bin_path = str(candidate) if candidate.is_file() else "nitrobox-core"
 
-        # buildah needs userns with full UID mapping (same as image-pull)
-        from nitrobox.config import detect_subuid_range
-        subuid = detect_subuid_range()
-        if not subuid:
-            raise RuntimeError("buildah build requires subuid mapping")
-
-        outer_uid, sub_start, sub_count = subuid
-        outer_gid = os.getgid()
-
         from nitrobox.image.layers import _containers_storage_root
-        from pathlib import Path
         graph_root = _containers_storage_root()
         if graph_root is None:
             graph_root = Path.home() / ".local/share/containers/storage"
@@ -486,36 +481,14 @@ class ComposeProject:
             "run_root": str(run_root),
         }).encode()
 
-        # Fork + unshare + newuidmap + exec (same pattern as image-pull)
-        import ctypes
-        userns_r, userns_w = os.pipe()
-        go_r, go_w = os.pipe()
-        json_r, json_w = os.pipe()
-
-        pid = os.fork()
-        if pid == 0:
-            os.close(userns_r); os.close(go_w); os.close(json_w)
-            libc = ctypes.CDLL("libc.so.6", use_errno=True)
-            if libc.unshare(0x10000000) != 0:
-                os._exit(1)
-            os.write(userns_w, b"R"); os.close(userns_w)
-            os.read(go_r, 1); os.close(go_r)
-            os.dup2(json_r, 0); os.close(json_r)
-            os.execvp(bin_path, [bin_path, "image-build"])
-            os._exit(127)
-
-        os.close(userns_w); os.close(go_r); os.close(json_r)
-        os.read(userns_r, 1); os.close(userns_r)
-        _sp.run(["newuidmap", str(pid), "0", str(outer_uid), "1", "1", str(sub_start), str(sub_count)],
-                capture_output=True)
-        _sp.run(["newgidmap", str(pid), "0", str(outer_gid), "1", "1", str(sub_start), str(sub_count)],
-                capture_output=True)
-        os.write(go_w, b"G"); os.close(go_w)
-        os.write(json_w, req); os.close(json_w)
-
-        _, status = os.waitpid(pid, 0)
-        if os.waitstatus_to_exitcode(status) != 0:
-            raise RuntimeError(f"buildah build failed for {tag}")
+        result = _sp.run(
+            [bin_path, "image-build"],
+            input=req, capture_output=True,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"buildah build failed for {tag}: {result.stderr.decode()[:500]}"
+            )
 
     def _resolve_image(self, svc: _Service) -> str:
         """Resolve the Docker image name for a service."""

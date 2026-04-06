@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"go.podman.io/storage/pkg/reexec"
+	"go.podman.io/storage/pkg/unshare"
 
 	"github.com/opensage-agent/nitrobox/go/internal/cgroup"
 	nbxckpt "github.com/opensage-agent/nitrobox/go/internal/checkpoint"
@@ -27,6 +30,9 @@ import (
 )
 
 func main() {
+	// Ignore SIGPIPE — buildah's reexec children may close pipes before we finish writing.
+	signal.Ignore(syscall.SIGPIPE)
+
 	// containers/storage requires reexec.Init() for chroot-based layer operations.
 	reexec.Init()
 
@@ -726,9 +732,29 @@ func main() {
 				RunRoot    string `json:"run_root"`
 				Driver     string `json:"driver"`
 			}
-			if err := readJSON(&req); err != nil {
-				return err
+
+			// MaybeReexec re-execs the binary in a userns. Stdin doesn't
+			// survive re-exec, so pass config via env var.
+			if configEnv := os.Getenv("_NITROBOX_BUILD_CONFIG"); configEnv != "" {
+				// We're in the re-exec'd process — read config from env
+				json.Unmarshal([]byte(configEnv), &req)
+			} else {
+				// First invocation — read from stdin, save to env, then re-exec
+				if err := readJSON(&req); err != nil {
+					return err
+				}
+				reqJSON, _ := json.Marshal(req)
+				os.Setenv("_NITROBOX_BUILD_CONFIG", string(reqJSON))
 			}
+
+			// Enter user namespace (same as podman/buildah does).
+			// On first call: re-execs into userns (never returns).
+			// On re-exec: already in userns, returns immediately.
+			unshare.MaybeReexecUsingUserNamespace(false)
+
+			// Clear config env so buildah reexec children don't see it
+			os.Unsetenv("_NITROBOX_BUILD_CONFIG")
+
 			cfg := nbximage.DefaultStoreConfig()
 			if req.GraphRoot != "" {
 				cfg.GraphRoot = req.GraphRoot
@@ -739,6 +765,13 @@ func main() {
 			if req.Driver != "" {
 				cfg.Driver = req.Driver
 			}
+
+			// Redirect stdin to /dev/null after reading JSON config
+			if devnull, err := os.Open("/dev/null"); err == nil {
+				syscall.Dup2(int(devnull.Fd()), 0)
+				devnull.Close()
+			}
+
 			store, err := nbximage.OpenStore(cfg)
 			if err != nil {
 				return err
