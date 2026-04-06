@@ -398,4 +398,31 @@ class PySpawnResult:
 
 
 def py_spawn_sandbox(config: dict) -> PySpawnResult:
-    raise NotImplementedError("py_spawn_sandbox: Phase 4 (spawn)")
+    """Spawn a sandboxed shell via the Go binary.
+
+    The Go binary forks internally and returns the result JSON with
+    file descriptors. The fds are inherited because we use pass_fds.
+    However, spawn is special: the Go binary does the fork/exec itself
+    and returns fd numbers. We call it as a subprocess, parse the result,
+    and the fds are valid in our process because Go's child inherits them
+    from us via fork (not subprocess).
+
+    Actually, this is the tricky part: the Go binary forks internally,
+    the parent returns the result, but the fds are created inside the
+    Go process. They won't be accessible from Python's process.
+
+    The correct approach: Go binary writes the spawn result JSON to
+    stdout, and the actual shell process is a grandchild. The pipes
+    were created in the Go process, so we need to receive them via
+    Unix domain socket or the Go binary needs to create them in the
+    calling process.
+
+    For now, spawn still uses the Rust backend. The Go spawn will be
+    wired up in Phase 5 when we change _shell.py to call the Go binary
+    directly via Popen (not through _go_core.py subprocess wrapper).
+    """
+    # Spawn requires fd passing — can't go through subprocess JSON protocol.
+    # Fall back to Rust for now; Phase 5 will wire this up properly.
+    from nitrobox._core import py_spawn_sandbox as _rust_spawn
+
+    return _rust_spawn(config)

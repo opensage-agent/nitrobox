@@ -14,6 +14,7 @@ import (
 	"github.com/opensage-agent/nitrobox/go/internal/pidfd"
 	"github.com/opensage-agent/nitrobox/go/internal/proc"
 	"github.com/opensage-agent/nitrobox/go/internal/qmp"
+	"github.com/opensage-agent/nitrobox/go/internal/sandbox"
 	"github.com/opensage-agent/nitrobox/go/internal/security"
 	"github.com/opensage-agent/nitrobox/go/internal/unpack"
 	"github.com/opensage-agent/nitrobox/go/internal/userns"
@@ -580,6 +581,23 @@ func main() {
 				return fmt.Errorf("no command specified after --")
 			}
 			return nsenter.NsenterExec(targetPid, rootful, rootfs, workDir, cmdArgs)
+		},
+	})
+
+	// --- sandbox spawn ---
+	rootCmd.AddCommand(&cobra.Command{
+		Use:   "spawn",
+		Short: "Spawn a sandboxed shell process",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var config sandbox.SpawnConfig
+			if err := readJSON(&config); err != nil {
+				return err
+			}
+			result, err := sandbox.Spawn(&config)
+			if err != nil {
+				return err
+			}
+			return writeJSON(result)
 		},
 	})
 
