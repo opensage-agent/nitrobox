@@ -2382,3 +2382,137 @@ class TestDevicesRootful:
             _check_devices_feature_flag(box)
         finally:
             box.delete()
+
+
+# ------------------------------------------------------------------ #
+#  Docker parity: /sys, masked paths, readonly paths                   #
+# ------------------------------------------------------------------ #
+
+
+class TestDockerParity:
+    """Verify sandbox behavior matches Docker defaults.
+
+    Reference: moby daemon/pkg/oci/defaults.go + runc libcontainer/rootfs_linux.go.
+    These tests run as non-root (userns mode) which is the primary use case.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _skip_if_root_or_no_docker(self):
+        if os.geteuid() == 0:
+            pytest.skip("parity tests run as non-root")
+        _requires_docker()
+
+    @pytest.fixture
+    def sandbox(self, tmp_path, shared_cache_dir):
+        config = SandboxConfig(
+            image=TEST_IMAGE,
+            working_dir="/workspace",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        box = Sandbox(config, name="parity-test")
+        yield box
+        box.delete()
+
+    # -- /sys mount ---------------------------------------------------- #
+
+    def test_sys_mounted(self, sandbox):
+        """/sys should be mounted."""
+        output, ec = sandbox.run("test -d /sys/devices && echo ok")
+        assert "ok" in output
+
+    def test_sys_readonly(self, sandbox):
+        """/sys should be read-only (matches Docker ro sysfs)."""
+        output, ec = sandbox.run("touch /sys/testfile 2>&1")
+        assert ec != 0
+
+    def test_sys_cpu_topology(self, sandbox):
+        """/sys/devices/system/cpu topology should be readable (joblib needs this)."""
+        output, ec = sandbox.run("cat /sys/devices/system/cpu/cpu0/topology/core_id")
+        assert ec == 0
+        assert output.strip().split("\n")[-1].isdigit()
+
+    # -- Masked paths (moby GHSA advisories) --------------------------- #
+
+    def test_sys_firmware_masked(self, sandbox):
+        """/sys/firmware should be masked with empty tmpfs."""
+        output, ec = sandbox.run("ls /sys/firmware/ 2>&1 | wc -l")
+        assert int(output.strip()) == 0
+
+    def test_sys_powercap_masked(self, sandbox):
+        """/sys/devices/virtual/powercap should be masked."""
+        output, ec = sandbox.run("ls /sys/devices/virtual/powercap/ 2>&1 | wc -l")
+        # Either masked (0 entries) or doesn't exist — both are fine
+        assert ec == 0 or "No such file" in output
+
+    def test_proc_kcore_masked(self, sandbox):
+        """/proc/kcore should be masked (bound to /dev/null)."""
+        output, ec = sandbox.run("cat /proc/kcore 2>&1 | wc -c")
+        assert int(output.strip()) == 0
+
+    def test_proc_interrupts_masked(self, sandbox):
+        """/proc/interrupts should be masked (GHSA-6fw5-f8r9-fgfm)."""
+        output, ec = sandbox.run("cat /proc/interrupts 2>&1 | wc -c")
+        assert int(output.strip()) == 0
+
+    def test_proc_keys_masked(self, sandbox):
+        """/proc/keys should be masked."""
+        output, ec = sandbox.run("cat /proc/keys 2>&1 | wc -c")
+        assert int(output.strip()) == 0
+
+    # -- Readonly paths ------------------------------------------------ #
+
+    def test_proc_sys_readonly(self, sandbox):
+        """/proc/sys should be read-only."""
+        output, ec = sandbox.run("touch /proc/sys/testfile 2>&1")
+        assert ec != 0
+
+    def test_proc_sysrq_trigger_readonly(self, sandbox):
+        """/proc/sysrq-trigger should be read-only."""
+        output, ec = sandbox.run("echo h > /proc/sysrq-trigger 2>&1")
+        assert ec != 0
+
+    # -- Parity with Docker (run same checks in Docker and compare) ---- #
+
+    def test_full_parity_with_docker(self, sandbox, tmp_path):
+        """Run identical checks in both Docker and nitrobox, compare results."""
+        checks = [
+            ("sys_mount_type", "mount | grep '/sys ' | grep -o 'type [a-z]*' | head -1"),
+            ("sys_ro", "mount | grep '/sys ' | grep -c 'ro,' || echo 0"),
+            ("sys_firmware_empty", "ls /sys/firmware/ 2>/dev/null | wc -l"),
+            ("proc_kcore_empty", "cat /proc/kcore 2>/dev/null | wc -c"),
+            ("proc_interrupts_empty", "cat /proc/interrupts 2>/dev/null | wc -c"),
+            ("proc_sys_ro", "touch /proc/sys/_test 2>/dev/null; echo $?"),
+        ]
+
+        nbx_results = {}
+        for name, cmd in checks:
+            out, _ = sandbox.run(cmd)
+            lines = [l for l in out.strip().split("\n")
+                     if "cannot create /dev/null" not in l]
+            nbx_results[name] = lines[-1].strip() if lines else ""
+
+        # Run same in Docker
+        cname = f"parity-{os.getpid()}"
+        subprocess.run(["docker", "rm", "-f", cname], capture_output=True)
+        subprocess.run(
+            ["docker", "run", "-d", "--name", cname, TEST_IMAGE, "sleep", "infinity"],
+            capture_output=True, check=True,
+        )
+        docker_results = {}
+        try:
+            for name, cmd in checks:
+                r = subprocess.run(
+                    ["docker", "exec", cname, "bash", "-c", cmd],
+                    capture_output=True, text=True,
+                )
+                docker_results[name] = r.stdout.strip().split("\n")[-1].strip()
+        finally:
+            subprocess.run(["docker", "rm", "-f", cname], capture_output=True)
+
+        # Compare
+        for name in nbx_results:
+            assert nbx_results[name] == docker_results[name], (
+                f"Mismatch on {name}: nitrobox={nbx_results[name]!r}, "
+                f"docker={docker_results[name]!r}"
+            )

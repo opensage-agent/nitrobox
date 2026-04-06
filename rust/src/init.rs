@@ -78,18 +78,23 @@ pub struct SpawnResult {
 // ======================================================================
 
 // Matches runc default (specconv/example.go:104-115).
+// Matches moby default (daemon/pkg/oci/defaults.go:defaultLinuxMaskedPaths).
 const MASKED_PATHS: &[&str] = &[
     "/proc/acpi",
     "/proc/asound",
+    "/proc/interrupts",
     "/proc/kcore",
     "/proc/keys",
     "/proc/latency_stats",
+    "/proc/sched_debug",
+    "/proc/scsi",
     "/proc/timer_list",
     "/proc/timer_stats",
-    "/proc/sched_debug",
+    "/sys/devices/virtual/powercap",
     "/sys/firmware",
-    "/proc/scsi",
 ];
+// Note: moby also masks /sys/devices/system/cpu/cpuN/thermal_throttle
+// dynamically.  We handle that in apply_security() below.
 
 const RO_PATHS: &[&str] = &[
     "/proc/bus",
@@ -211,10 +216,11 @@ fn mount_proc(rootfs: &str, net_isolate: bool, vm_mode: bool, host_sys: Option<&
     }
 
     // Mount /sys: fresh sysfs when we own the netns, bind-mount otherwise.
-    if net_isolate || vm_mode {
+    {
         let sys_path = format!("{rootfs}/sys");
         let _ = std::fs::create_dir_all(&sys_path);
         if net_isolate {
+            // Own netns: mount fresh sysfs (kernel requires new netns for this).
             if let Err(e) = mnt(
                 Some("sysfs"),
                 &sys_path,
@@ -225,18 +231,30 @@ fn mount_proc(rootfs: &str, net_isolate: bool, vm_mode: bool, host_sys: Option<&
                 log::debug!("mount fresh sysfs failed: {e}");
             }
         } else {
-            // vm_mode without net_isolate: bind-mount host's /sys read-only.
-            // After pivot_root, /sys is inside the overlayfs (empty).
-            // Use host_sys (e.g. /.pivot_old/sys) to reach real sysfs.
+            // Shared netns: bind-mount host's /sys read-only.
+            // Matches Docker default (oci/defaults.go): ro,nosuid,nodev,noexec.
             let src = host_sys.unwrap_or("/sys");
-            if let Err(e) = mnt(
+            if mnt(
                 Some(src),
                 &sys_path,
                 None::<&str>,
                 MsFlags::MS_BIND | MsFlags::MS_REC,
                 None,
-            ) {
-                log::debug!("bind-mount /sys failed: {e}");
+            )
+            .is_ok()
+            {
+                let _ = mnt(
+                    None::<&str>,
+                    &sys_path,
+                    None::<&str>,
+                    MsFlags::MS_BIND
+                        | MsFlags::MS_REMOUNT
+                        | MsFlags::MS_RDONLY
+                        | MsFlags::MS_NOSUID
+                        | MsFlags::MS_NODEV
+                        | MsFlags::MS_NOEXEC,
+                    None,
+                );
             }
         }
     }
@@ -554,6 +572,34 @@ fn precreate_volume_mountpoints(config: &SandboxSpawnConfig) {
 // Security (post pivot_root / chroot)
 // ======================================================================
 
+/// Mask a path: tmpfs (read-only) for directories, /dev/null bind for files.
+/// Matches runc's maskPaths() in libcontainer/rootfs_linux.go.
+fn mask_path(path: &str) {
+    if !Path::new(path).exists() {
+        return;
+    }
+    let result = if Path::new(path).is_dir() {
+        mnt(
+            Some("tmpfs"),
+            path,
+            Some("tmpfs"),
+            MsFlags::MS_RDONLY,
+            Some("size=0"),
+        )
+    } else {
+        mnt(
+            Some("/dev/null"),
+            path,
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None,
+        )
+    };
+    if let Err(e) = result {
+        init_warn_tl(&format!("mask_path {path} failed: {e}"));
+    }
+}
+
 fn apply_security(config: &SandboxSpawnConfig) {
     if let Some(ref hostname) = config.hostname {
         if let Err(e) = unistd::sethostname(hostname) {
@@ -569,24 +615,20 @@ fn apply_security(config: &SandboxSpawnConfig) {
     // vm_mode: skip path masking and read-only enforcement.
     // QEMU needs writable /proc/sys and readable /sys/firmware.
     if !config.vm_mode {
-        // Mask paths
+        // Mask paths (matches runc maskPaths: tmpfs ro for dirs, /dev/null bind for files)
         for path in MASKED_PATHS {
-            if !Path::new(path).exists() {
-                continue;
-            }
-            let result = if Path::new(path).is_dir() {
-                mnt(Some("tmpfs"), path, Some("tmpfs"), MsFlags::empty(), None)
-            } else {
-                mnt(
-                    Some("/dev/null"),
-                    path,
-                    None::<&str>,
-                    MsFlags::MS_BIND,
-                    None,
-                )
-            };
-            if let Err(e) = result {
-                init_warn_tl(&format!("mask_path {path} failed: {e}"));
+            mask_path(path);
+        }
+        // Dynamic: mask /sys/devices/system/cpu/cpuN/thermal_throttle
+        // (moby GHSA-6fw5-f8r9-fgfm)
+        if let Ok(entries) = std::fs::read_dir("/sys/devices/system/cpu") {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("cpu") && name[3..].chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                    let p = format!("/sys/devices/system/cpu/{name}/thermal_throttle");
+                    mask_path(&p);
+                }
             }
         }
 
