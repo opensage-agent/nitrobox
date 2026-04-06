@@ -601,6 +601,35 @@ func main() {
 		},
 	})
 
+	// Internal re-exec subcommand for extraction worker (not user-facing)
+	rootCmd.AddCommand(&cobra.Command{
+		Use:    "_extract-worker",
+		Hidden: true,
+		Run: func(cmd *cobra.Command, args []string) {
+			unpack.ExtractWorker()
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
+		Use:    "_rmtree-worker",
+		Hidden: true,
+		Run: func(cmd *cobra.Command, args []string) {
+			// fd 3 = usernsPipeW, fd 4 = goPipeR
+			usernsPipeW := os.NewFile(3, "usernsPipeW")
+			goPipeR := os.NewFile(4, "goPipeR")
+			usernsPipeW.Write([]byte("R"))
+			usernsPipeW.Close()
+			buf := make([]byte, 1)
+			goPipeR.Read(buf)
+			goPipeR.Close()
+
+			path := os.Getenv("_NBX_RM_PATH")
+			if path != "" {
+				os.RemoveAll(path)
+			}
+		},
+	})
+
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)

@@ -38,6 +38,17 @@ type SpawnConfig struct {
 	Ipv6             bool              `json:"ipv6"`
 	EnvDir           *string           `json:"env_dir"`
 	VmMode           bool              `json:"vm_mode"`
+
+	// Pre-created fds from Python (pass_fds mode).
+	// When set, Go uses these instead of creating its own pipes.
+	PreStdinR  *int `json:"pre_stdin_r"`
+	PreStdinW  *int `json:"pre_stdin_w"`
+	PreStdoutR *int `json:"pre_stdout_r"`
+	PreStdoutW *int `json:"pre_stdout_w"`
+	PreSignalR *int `json:"pre_signal_r"`
+	PreSignalW *int `json:"pre_signal_w"`
+	PreErrR    *int `json:"pre_err_r"`
+	PreErrW    *int `json:"pre_err_w"`
 }
 
 // SpawnResult mirrors the Rust PySpawnResult.

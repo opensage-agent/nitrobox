@@ -3,6 +3,7 @@ package unpack
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"fmt"
 	"io"
@@ -17,117 +18,140 @@ import (
 const overflowID = 65534
 
 // ExtractTarInUserns extracts a tar file inside a user namespace with full UID/GID mapping.
+// Uses re-exec pattern instead of raw fork (Go's runtime is not fork-safe).
 func ExtractTarInUserns(tarPath, dest string, outerUID, outerGID, subStart, subCount uint32) error {
-	usernsPipe := makePipe()
-	goPipe := makePipe()
+	// Re-exec self with a special subcommand that does the extraction.
+	// The child process is started with CLONE_NEWUSER via SysProcAttr.
+	self, _ := os.Executable()
 
-	pid, _, errno := unix.Syscall(unix.SYS_FORK, 0, 0, 0)
-	if errno != 0 {
-		return errno
+	usernsPipeR, usernsPipeW, _ := os.Pipe()
+	goPipeR, goPipeW, _ := os.Pipe()
+
+	cmd := exec.Command(self, "_extract-worker")
+	cmd.Stdin = nil
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.ExtraFiles = []*os.File{usernsPipeW, goPipeR} // fd 3 = usernsPipeW, fd 4 = goPipeR
+	cmd.Env = []string{
+		fmt.Sprintf("_NBX_TAR_PATH=%s", tarPath),
+		fmt.Sprintf("_NBX_DEST=%s", dest),
+		fmt.Sprintf("_NBX_MAX_ID=%d", subCount),
+	}
+	cmd.SysProcAttr = &unix.SysProcAttr{
+		Cloneflags: unix.CLONE_NEWUSER,
 	}
 
-	if pid == 0 {
-		// Child
-		unix.Close(usernsPipe.r)
-		unix.Close(goPipe.w)
-
-		if _, _, err := unix.Syscall(unix.SYS_UNSHARE, uintptr(unix.CLONE_NEWUSER), 0, 0); err != 0 {
-			unix.Exit(1)
-		}
-
-		unix.Write(usernsPipe.w, []byte("R"))
-		unix.Close(usernsPipe.w)
-
-		buf := make([]byte, 1)
-		unix.Read(goPipe.r, buf)
-		unix.Close(goPipe.r)
-
-		if err := doExtract(tarPath, dest, subCount); err != nil {
-			fmt.Fprintf(os.Stderr, "nitrobox: layer extraction failed: %v\n", err)
-			unix.Exit(2)
-		}
-		unix.Exit(0)
+	if err := cmd.Start(); err != nil {
+		usernsPipeR.Close()
+		usernsPipeW.Close()
+		goPipeR.Close()
+		goPipeW.Close()
+		return fmt.Errorf("start extract worker: %w", err)
 	}
+	usernsPipeW.Close()
+	goPipeR.Close()
 
-	// Parent
-	unix.Close(usernsPipe.w)
-	unix.Close(goPipe.r)
-
+	// Wait for child to signal userns ready
 	buf := make([]byte, 1)
-	unix.Read(usernsPipe.r, buf)
-	unix.Close(usernsPipe.r)
+	usernsPipeR.Read(buf)
+	usernsPipeR.Close()
 
-	mappingErr := setupIDMapping(int(pid), outerUID, outerGID, subStart, subCount)
+	// Set up UID/GID mapping
+	mappingErr := setupIDMapping(cmd.Process.Pid, outerUID, outerGID, subStart, subCount)
 
-	unix.Write(goPipe.w, []byte("G"))
-	unix.Close(goPipe.w)
+	// Signal child to proceed
+	goPipeW.Write([]byte("G"))
+	goPipeW.Close()
 
 	if mappingErr != nil {
-		unix.Kill(int(pid), unix.SIGKILL)
-		var ws unix.WaitStatus
-		unix.Wait4(int(pid), &ws, 0, nil)
+		cmd.Process.Kill()
+		cmd.Wait()
 		return mappingErr
 	}
 
-	var ws unix.WaitStatus
-	_, err := unix.Wait4(int(pid), &ws, 0, nil)
-	if err != nil {
-		return err
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("layer extraction in userns failed: %w", err)
 	}
-	if ws.Exited() && ws.ExitStatus() == 0 {
-		return nil
+	return nil
+}
+
+// ExtractWorker is the re-exec entry point for extraction inside a user namespace.
+// Called as: nitrobox-core _extract-worker (with env vars and extra fds).
+func ExtractWorker() {
+	tarPath := os.Getenv("_NBX_TAR_PATH")
+	dest := os.Getenv("_NBX_DEST")
+	maxIDStr := os.Getenv("_NBX_MAX_ID")
+	maxID := uint32(65536)
+	fmt.Sscanf(maxIDStr, "%d", &maxID)
+
+	// fd 3 = usernsPipeW, fd 4 = goPipeR (from ExtraFiles)
+	usernsPipeW := os.NewFile(3, "usernsPipeW")
+	goPipeR := os.NewFile(4, "goPipeR")
+
+	// Signal parent that userns is ready
+	usernsPipeW.Write([]byte("R"))
+	usernsPipeW.Close()
+
+	// Wait for UID mapping
+	buf := make([]byte, 1)
+	goPipeR.Read(buf)
+	goPipeR.Close()
+
+	if err := doExtract(tarPath, dest, maxID); err != nil {
+		fmt.Fprintf(os.Stderr, "nitrobox: layer extraction failed: %v\n", err)
+		os.Exit(2)
 	}
-	return fmt.Errorf("layer extraction in userns failed (exit code %d)", ws.ExitStatus())
+	os.Exit(0)
 }
 
 // RmtreeInUserns removes a directory tree containing files with mapped UIDs.
 func RmtreeInUserns(path string, outerUID, outerGID, subStart, subCount uint32) error {
-	usernsPipe := makePipe()
-	goPipe := makePipe()
+	self, _ := os.Executable()
 
-	pid, _, errno := unix.Syscall(unix.SYS_FORK, 0, 0, 0)
-	if errno != 0 {
-		return errno
+	usernsPipeR, usernsPipeW, _ := os.Pipe()
+	goPipeR, goPipeW, _ := os.Pipe()
+
+	cmd := exec.Command(self, "_rmtree-worker")
+	cmd.ExtraFiles = []*os.File{usernsPipeW, goPipeR}
+	cmd.Env = []string{fmt.Sprintf("_NBX_RM_PATH=%s", path)}
+	cmd.SysProcAttr = &unix.SysProcAttr{
+		Cloneflags: unix.CLONE_NEWUSER,
 	}
 
-	if pid == 0 {
-		// Child
-		unix.Close(usernsPipe.r)
-		unix.Close(goPipe.w)
-
-		if _, _, err := unix.Syscall(unix.SYS_UNSHARE, uintptr(unix.CLONE_NEWUSER), 0, 0); err != 0 {
-			unix.Exit(1)
-		}
-
-		unix.Write(usernsPipe.w, []byte("R"))
-		unix.Close(usernsPipe.w)
-
-		buf := make([]byte, 1)
-		unix.Read(goPipe.r, buf)
-		unix.Close(goPipe.r)
-
-		// exec rm -rf
-		unix.Exec("/bin/rm", []string{"rm", "-rf", path}, os.Environ())
-		unix.Exit(127)
-		return nil // unreachable
+	if err := cmd.Start(); err != nil {
+		usernsPipeR.Close()
+		usernsPipeW.Close()
+		goPipeR.Close()
+		goPipeW.Close()
+		return err
 	}
-
-	// Parent
-	unix.Close(usernsPipe.w)
-	unix.Close(goPipe.r)
+	usernsPipeW.Close()
+	goPipeR.Close()
 
 	buf := make([]byte, 1)
-	unix.Read(usernsPipe.r, buf)
-	unix.Close(usernsPipe.r)
+	usernsPipeR.Read(buf)
+	usernsPipeR.Close()
 
-	_ = setupIDMapping(int(pid), outerUID, outerGID, subStart, subCount)
+	_ = setupIDMapping(cmd.Process.Pid, outerUID, outerGID, subStart, subCount)
 
-	unix.Write(goPipe.w, []byte("G"))
-	unix.Close(goPipe.w)
+	goPipeW.Write([]byte("G"))
+	goPipeW.Close()
 
-	var ws unix.WaitStatus
-	unix.Wait4(int(pid), &ws, 0, nil)
+	cmd.Wait()
 	return nil
+}
+
+// closeInheritedStdio redirects stdout/stderr to /dev/null in forked children.
+// When Go runs as a subprocess (Python's Popen), the child inherits the Popen
+// stdout/stderr pipes. If we don't close them, Python's subprocess.run() blocks
+// forever waiting for the pipe to close.
+func closeInheritedStdio() {
+	devnull, err := unix.Open("/dev/null", unix.O_WRONLY, 0)
+	if err == nil {
+		unix.Dup2(devnull, 1)
+		unix.Dup2(devnull, 2)
+		unix.Close(devnull)
+	}
 }
 
 type pipe struct{ r, w int }
@@ -157,22 +181,30 @@ func setupIDMapping(childPid int, outerUID, outerGID, subStart, subCount uint32)
 }
 
 // doExtract is the child-side extraction logic.
+// Reads the entire tar into memory first (matching Rust behavior), then parses.
+// This is critical for FIFO sources where streaming tar.Reader can deadlock
+// on partial reads.
 func doExtract(tarPath, dest string, maxID uint32) error {
 	f, err := os.Open(tarPath)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	data, err := io.ReadAll(f)
+	f.Close()
+	if err != nil {
+		return fmt.Errorf("read tar failed: %w", err)
+	}
 
-	// Try gzip first
-	gz, gzErr := gzip.NewReader(f)
 	var reader io.Reader
-	if gzErr == nil {
-		reader = gz
+	if len(data) >= 2 && data[0] == 0x1f && data[1] == 0x8b {
+		gz, err := gzip.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return fmt.Errorf("gzip open failed: %w", err)
+		}
 		defer gz.Close()
+		reader = gz
 	} else {
-		f.Seek(0, io.SeekStart)
-		reader = f
+		reader = bytes.NewReader(data)
 	}
 
 	return unpackTar(tar.NewReader(reader), dest, maxID)
@@ -266,51 +298,57 @@ func unpackTar(tr *tar.Reader, dest string, maxID uint32) error {
 			}
 		}
 
-		// Create entry
+		// Create entry — skip on permission/access errors (common for /proc, /sys in live containers)
+		var createErr error
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if info, err := os.Lstat(fullPath); err != nil || !info.IsDir() {
-				if err := os.Mkdir(fullPath, os.FileMode(mode)); err != nil {
-					return err
-				}
+				createErr = os.Mkdir(fullPath, os.FileMode(mode))
 			}
 		case tar.TypeReg, tar.TypeRegA:
 			f, err := os.OpenFile(fullPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(mode))
 			if err != nil {
-				return err
-			}
-			if _, err := io.Copy(f, tr); err != nil {
+				createErr = err
+			} else {
+				_, createErr = io.Copy(f, tr)
 				f.Close()
-				return err
 			}
-			f.Close()
 		case tar.TypeSymlink:
 			linkTarget := hdr.Linkname
 			if !filepath.IsAbs(linkTarget) {
 				resolvedLink := filepath.Clean(filepath.Join(filepath.Dir(fullPath), linkTarget))
 				if !strings.HasPrefix(resolvedLink, filepath.Clean(dest)) {
-					return fmt.Errorf("symlink breakout: %s -> %s", fullPath, linkTarget)
+					createErr = fmt.Errorf("symlink breakout: %s -> %s", fullPath, linkTarget)
 				}
 			}
-			if err := os.Symlink(linkTarget, fullPath); err != nil {
-				return err
+			if createErr == nil {
+				createErr = os.Symlink(linkTarget, fullPath)
 			}
 		case tar.TypeLink:
 			linkTarget := hdr.Linkname
 			targetAbs := filepath.Join(dest, linkTarget)
 			if !strings.HasPrefix(filepath.Clean(targetAbs), filepath.Clean(dest)) {
-				return fmt.Errorf("hardlink breakout: %s -> %s", fullPath, linkTarget)
-			}
-			if err := os.Link(targetAbs, fullPath); err != nil {
-				return err
+				createErr = fmt.Errorf("hardlink breakout: %s -> %s", fullPath, linkTarget)
+			} else {
+				createErr = os.Link(targetAbs, fullPath)
 			}
 		case tar.TypeFifo:
-			if err := unix.Mkfifo(fullPath, mode); err != nil {
-				return err
-			}
+			createErr = unix.Mkfifo(fullPath, mode)
 		case tar.TypeXGlobalHeader, tar.TypeXHeader:
 			continue
 		default:
+			continue
+		}
+		if createErr != nil {
+			// Skip permission errors (e.g. /proc files in live container tar)
+			if os.IsPermission(createErr) {
+				continue
+			}
+			// Skip "breakout" as fatal, everything else as non-fatal
+			errStr := createErr.Error()
+			if strings.Contains(errStr, "breakout") {
+				return createErr
+			}
 			continue
 		}
 

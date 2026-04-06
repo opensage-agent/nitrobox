@@ -50,19 +50,36 @@ func makePipe() (r, w int) {
 func ptrInt(v int) *int { return &v }
 
 // Spawn creates a sandboxed shell process. This is a direct port of Rust spawn_sandbox.
+//
+// When Pre* fd fields are set in config, those fds are used instead of creating
+// new pipes. This is for the Python pass_fds mode where Python creates the pipes
+// and passes them to the Go binary.
 func Spawn(config *SpawnConfig) (*SpawnResult, error) {
-	errR, errW := makePipe()
-	signalR, signalW := makePipe()
+	var errR, errW int
+	if config.PreErrR != nil && config.PreErrW != nil {
+		errR, errW = *config.PreErrR, *config.PreErrW
+	} else {
+		errR, errW = makePipe()
+	}
+
+	var signalR, signalW int
+	if config.PreSignalR != nil && config.PreSignalW != nil {
+		signalR, signalW = *config.PreSignalR, *config.PreSignalW
+	} else {
+		signalR, signalW = makePipe()
+	}
 
 	var stdinR, stdinW, stdoutR, stdoutW int
 	var masterFd *int
 
-	if config.Tty {
+	if config.PreStdinR != nil && config.PreStdinW != nil && config.PreStdoutR != nil && config.PreStdoutW != nil {
+		stdinR, stdinW = *config.PreStdinR, *config.PreStdinW
+		stdoutR, stdoutW = *config.PreStdoutR, *config.PreStdoutW
+	} else if config.Tty {
 		master, slave, err := openPty()
 		if err != nil {
 			return nil, fmt.Errorf("openpty failed: %w", err)
 		}
-		// Disable echo
 		attrs, err := unix.IoctlGetTermios(master, unix.TCGETS)
 		if err == nil {
 			attrs.Lflag &^= unix.ECHO
@@ -84,14 +101,25 @@ func Spawn(config *SpawnConfig) (*SpawnResult, error) {
 		syncR, syncW = makePipe()
 	}
 
+	// Save Go's stdout/stderr fds (pipes to Python's Popen) so child can close them
+	goStdout, _ := unix.Dup(1)
+	goStderr, _ := unix.Dup(2)
+	unix.CloseOnExec(goStdout)
+	unix.CloseOnExec(goStderr)
+
 	// Fork
 	pid, _, errno := unix.Syscall(unix.SYS_FORK, 0, 0, 0)
 	if errno != 0 {
+		unix.Close(goStdout)
+		unix.Close(goStderr)
 		return nil, errno
 	}
 
 	if pid == 0 {
 		// === CHILD A ===
+		// Close Go's Popen stdout/stderr pipes so Python's communicate() can return
+		unix.Close(goStdout)
+		unix.Close(goStderr)
 		unix.Dup2(stdinR, 0)
 		if config.Tty {
 			unix.Dup2(stdinR, 1)
@@ -212,6 +240,10 @@ func Spawn(config *SpawnConfig) (*SpawnResult, error) {
 
 	// === PARENT ===
 	childPid := int(pid)
+
+	// Close saved Go stdout/stderr dups (no longer needed in parent)
+	unix.Close(goStdout)
+	unix.Close(goStderr)
 
 	if config.Tty {
 		unix.Close(stdinR)

@@ -26,7 +26,13 @@ func FixupDirForDelete(usernsPid int, dirPath string) (uint32, error) {
 	}
 
 	if pid == 0 {
-		// Child
+		// Child — close inherited Popen stdio
+		devnull, _ := unix.Open("/dev/null", unix.O_WRONLY, 0)
+		if devnull >= 0 {
+			unix.Dup2(devnull, 1)
+			unix.Dup2(devnull, 2)
+			unix.Close(devnull)
+		}
 		if err := unix.Setns(nsFd, unix.CLONE_NEWUSER); err != nil {
 			unix.Exit(1)
 		}

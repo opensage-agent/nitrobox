@@ -400,29 +400,72 @@ class PySpawnResult:
 def py_spawn_sandbox(config: dict) -> PySpawnResult:
     """Spawn a sandboxed shell via the Go binary.
 
-    The Go binary forks internally and returns the result JSON with
-    file descriptors. The fds are inherited because we use pass_fds.
-    However, spawn is special: the Go binary does the fork/exec itself
-    and returns fd numbers. We call it as a subprocess, parse the result,
-    and the fds are valid in our process because Go's child inherits them
-    from us via fork (not subprocess).
-
-    Actually, this is the tricky part: the Go binary forks internally,
-    the parent returns the result, but the fds are created inside the
-    Go process. They won't be accessible from Python's process.
-
-    The correct approach: Go binary writes the spawn result JSON to
-    stdout, and the actual shell process is a grandchild. The pipes
-    were created in the Go process, so we need to receive them via
-    Unix domain socket or the Go binary needs to create them in the
-    calling process.
-
-    For now, spawn still uses the Rust backend. The Go spawn will be
-    wired up in Phase 5 when we change _shell.py to call the Go binary
-    directly via Popen (not through _go_core.py subprocess wrapper).
+    Python creates pipes, passes them to Go via pass_fds. Go forks the
+    sandbox child which inherits those fds, then Go exits. The sandbox
+    shell (grandchild of Go) stays alive with pipes connected to Python.
     """
-    # Spawn requires fd passing — can't go through subprocess JSON protocol.
-    # Fall back to Rust for now; Phase 5 will wire this up properly.
-    from nitrobox._core import py_spawn_sandbox as _rust_spawn
+    # Create pipes in Python's process
+    stdin_r, stdin_w = os.pipe2(os.O_CLOEXEC)
+    stdout_r, stdout_w = os.pipe2(os.O_CLOEXEC)
+    signal_r, signal_w = os.pipe2(os.O_CLOEXEC)
+    err_r, err_w = os.pipe2(os.O_CLOEXEC)
 
-    return _rust_spawn(config)
+    # Clear CLOEXEC on the fds we pass to Go so they survive exec
+    for fd in (stdin_r, stdin_w, stdout_r, stdout_w, signal_r, signal_w, err_r, err_w):
+        import fcntl
+        flags = fcntl.fcntl(fd, fcntl.F_GETFD)
+        fcntl.fcntl(fd, fcntl.F_SETFD, flags & ~fcntl.FD_CLOEXEC)
+
+    # Add pre-created fd numbers to config
+    spawn_config = dict(config)
+    spawn_config["pre_stdin_r"] = stdin_r
+    spawn_config["pre_stdin_w"] = stdin_w
+    spawn_config["pre_stdout_r"] = stdout_r
+    spawn_config["pre_stdout_w"] = stdout_w
+    spawn_config["pre_signal_r"] = signal_r
+    spawn_config["pre_signal_w"] = signal_w
+    spawn_config["pre_err_r"] = err_r
+    spawn_config["pre_err_w"] = err_w
+
+    # Convert subuid_range tuple to list for JSON
+    if "subuid_range" in spawn_config and spawn_config["subuid_range"] is not None:
+        spawn_config["subuid_range"] = list(spawn_config["subuid_range"])
+
+    pass_fds = (stdin_r, stdin_w, stdout_r, stdout_w, signal_r, signal_w, err_r, err_w)
+
+    inp = json.dumps(spawn_config).encode()
+    proc = subprocess.Popen(
+        [_bin(), "spawn"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        pass_fds=pass_fds,
+    )
+    go_stdout, go_stderr = proc.communicate(input=inp, timeout=30)
+
+    # Close fds that belong to the child side
+    os.close(stdin_r)
+    os.close(stdout_w)
+    os.close(err_w)
+
+    if proc.returncode != 0:
+        for fd in (stdin_w, stdout_r, signal_r, signal_w, err_r):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        err_msg = go_stderr.decode().strip()
+        raise OSError(f"nitrobox-core spawn failed: {err_msg}")
+
+    result = json.loads(go_stdout.decode().strip())
+
+    return PySpawnResult(
+        pid=result["pid"],
+        stdin_fd=stdin_w,
+        stdout_fd=stdout_r,
+        signal_r_fd=signal_r,
+        signal_w_fd_num=signal_w,
+        master_fd=result.get("master_fd"),
+        pidfd=result.get("pidfd"),
+        err_r_fd=err_r,
+    )
