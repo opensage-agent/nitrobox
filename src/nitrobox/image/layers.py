@@ -34,7 +34,7 @@ def _containers_storage_root() -> Path | None:
     return None
 
 
-def _try_containers_storage(image_name: str) -> list[Path] | None:
+def _get_store_layers(image_name: str) -> list[Path] | None:
     """Get layer paths from containers/storage (zero-copy, pure Python).
 
     Reads the store's JSON metadata files directly. Returns None if the
@@ -69,10 +69,17 @@ def _try_containers_storage(image_name: str) -> list[Path] | None:
 
         # Find image by name
         top_layer = None
+        # Match image name: exact, with localhost/ prefix, or with :latest tag
+        search_names = [image_name]
+        if ":" not in image_name:
+            search_names.append(image_name + ":latest")
         for img in images:
             for name in img.get("names", []):
-                if name == image_name or name.endswith("/" + image_name):
-                    top_layer = img.get("layer", "")
+                for search in search_names:
+                    if name == search or name.endswith("/" + search):
+                        top_layer = img.get("layer", "")
+                        break
+                if top_layer:
                     break
             if top_layer:
                 break
@@ -213,7 +220,7 @@ def prepare_rootfs_layers_from_docker(
         Ordered list of layer directories (bottom to top).
     """
     # 1. Check containers/storage
-    layers = _try_containers_storage(image_name)
+    layers = _get_store_layers(image_name)
     if layers is not None:
         logger.info("Layer cache ready for %s: %d layers (zero-copy)",
                      image_name, len(layers))
@@ -228,7 +235,7 @@ def prepare_rootfs_layers_from_docker(
                 f"Check network connectivity and image name."
             )
 
-        layers = _try_containers_storage(image_name)
+        layers = _get_store_layers(image_name)
         if layers is not None:
             logger.info("Layer cache ready for %s: %d layers (zero-copy)",
                          image_name, len(layers))

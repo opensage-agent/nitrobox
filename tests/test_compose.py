@@ -2505,7 +2505,7 @@ class TestBuildahBuild:
         )
         proj = ComposeProject._buildah_build(str(ctx), "Dockerfile", "test-buildah-ci:latest")
 
-        from nitrobox.image.layers import _try_containers_storage
-        layers = _try_containers_storage("localhost/test-buildah-ci:latest")
+        from nitrobox.image.layers import _get_store_layers
+        layers = _get_store_layers("localhost/test-buildah-ci:latest")
         assert layers is not None, "Built image not found in containers/storage"
         assert len(layers) >= 1

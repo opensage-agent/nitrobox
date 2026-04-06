@@ -429,14 +429,14 @@ class ComposeProject:
         # Build missing images for services with build: section.
         # Uses buildah (via nitrobox-core image-build) to build directly
         # into containers/storage — no Docker daemon needed.
-        from nitrobox.image.layers import _try_containers_storage
+        from nitrobox.image.layers import _get_store_layers
         for name, svc in self._defs.items():
             if not svc.build or name not in mapping:
                 continue
 
             image_name = mapping[name]
             # Skip if already in containers/storage
-            if _try_containers_storage(image_name) is not None:
+            if _get_store_layers(image_name) is not None:
                 continue
 
             build_cfg = svc.build if isinstance(svc.build, dict) else {"context": svc.build}

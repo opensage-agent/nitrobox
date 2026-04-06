@@ -2032,11 +2032,11 @@ class TestRegistry:
         _skip_if_no_registry()
         from nitrobox.image.layers import (
             _containers_storage_pull,
-            _try_containers_storage,
+            _get_store_layers,
         )
 
         # alpine should already be in the store from earlier tests
-        layers = _try_containers_storage("docker.io/library/alpine:latest")
+        layers = _get_store_layers("docker.io/library/alpine:latest")
         assert layers is not None
         assert len(layers) >= 1
         assert (layers[0] / "bin").exists()
