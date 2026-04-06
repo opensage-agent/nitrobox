@@ -118,7 +118,6 @@ class _PersistentShell:
             self.kill()
 
         from nitrobox._core import py_spawn_sandbox
-
         result = py_spawn_sandbox(self._config)
 
         self.pid = result.pid

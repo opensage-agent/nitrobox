@@ -1064,7 +1064,9 @@ pub fn spawn_sandbox(config: &SandboxSpawnConfig) -> io::Result<SpawnResult> {
             if let Some(ref cg) = config.cgroup_path {
                 let procs = format!("{cg}/cgroup.procs");
                 let pid = rustix::process::getpid();
-                let _ = std::fs::write(&procs, format!("{}", pid.as_raw_nonzero()));
+                if let Err(e) = std::fs::write(&procs, format!("{}", pid.as_raw_nonzero())) {
+                    init_warn_tl(&format!("cgroup join failed ({procs}): {e}"));
+                }
             }
 
             // Shared userns: enter existing namespaces

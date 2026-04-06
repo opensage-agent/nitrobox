@@ -15,6 +15,10 @@ path = "rust/src/lib.rs"
 name = "stub_gen"
 path = "rust/src/bin/stub_gen.rs"
 
+[[bin]]
+name = "nitrobox-checkpoint-helper"
+path = "rust/src/bin/checkpoint_helper.rs"
+
 [dependencies]
 pyo3 = "0.28"
 pyo3-stub-gen = "0.21"
@@ -41,5 +45,6 @@ serde_json = "1"
 container_image_dist_ref = "0.3"
 tar = "0.4"
 flate2 = "1"
+sha2 = "0.10"
 log = "0.4"
 env_logger = "0.11"

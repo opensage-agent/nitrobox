@@ -43,6 +43,9 @@ class SharedNetwork:
     per pod, individual mount/pid namespaces per container.
     """
 
+    _live_instances: list[SharedNetwork] = []
+    _atexit_registered: bool = False
+
     def __init__(
         self,
         name: str = "default",
@@ -69,6 +72,7 @@ class SharedNetwork:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        SharedNetwork._live_instances.append(self)
 
         try:
             # Wait for child to enter new userns
@@ -111,6 +115,24 @@ class SharedNetwork:
         except Exception:
             self.destroy()
             raise
+
+        self._register_atexit()
+
+    @classmethod
+    def _register_atexit(cls) -> None:
+        if not cls._atexit_registered:
+            import atexit
+            atexit.register(cls._atexit_cleanup)
+            cls._atexit_registered = True
+
+    @classmethod
+    def _atexit_cleanup(cls) -> None:
+        for sn in list(cls._live_instances):
+            try:
+                sn.destroy()
+            except Exception:
+                pass
+        cls._live_instances.clear()
 
     def _start_pasta(self, port_map: list[str]) -> None:
         """Attach pasta to the sentinel's netns for NAT and DNS forwarding.
@@ -226,6 +248,10 @@ class SharedNetwork:
 
     def destroy(self) -> None:
         """Kill the sentinel, releasing the shared namespaces."""
+        try:
+            SharedNetwork._live_instances.remove(self)
+        except ValueError:
+            pass
         if self._sentinel.poll() is None:
             import signal as _signal
             try:

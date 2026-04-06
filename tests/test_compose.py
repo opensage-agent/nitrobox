@@ -2414,3 +2414,74 @@ class TestLayerManifestDigestCache:
         # "fake/image:v1" → safe_name "fake_image_v1" matches the file
         result = _get_manifest_diff_ids(cache_dir, "fake/image:v1")
         assert result == diff_ids
+
+
+# ------------------------------------------------------------------ #
+#  SharedNetwork cleanup                                               #
+# ------------------------------------------------------------------ #
+
+
+class TestSharedNetworkCleanup:
+    """Ensure SharedNetwork cleans up sentinel + pasta on destroy/atexit."""
+
+    def test_destroy_kills_sentinel(self):
+        """destroy() kills the sentinel process and releases namespaces."""
+        from nitrobox.compose._network import SharedNetwork
+
+        sn = SharedNetwork("test-cleanup", internet=False)
+        pid = sn._sentinel.pid
+
+        # Sentinel should be alive
+        assert sn.alive
+        os.kill(pid, 0)  # raises if not alive
+
+        sn.destroy()
+
+        assert not sn.alive
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_down_no_stale_sentinels(self, tmp_path):
+        """ComposeProject.down() leaves no stale sentinel processes."""
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              app:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+        """))
+
+        if subprocess.run(["docker", "info"], capture_output=True).returncode != 0:
+            pytest.skip("requires Docker")
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-stale",
+            env_base_dir=str(tmp_path / "envs"),
+        )
+        proj.up()
+
+        # Collect sentinel PIDs before down
+        sentinel_pids = []
+        for sn in proj._shared_nets.values():
+            sentinel_pids.append(sn._sentinel.pid)
+        assert len(sentinel_pids) > 0
+
+        proj.down()
+
+        # All sentinels should be dead
+        for pid in sentinel_pids:
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+
+    def test_atexit_registered(self):
+        """SharedNetwork registers an atexit handler."""
+        from nitrobox.compose._network import SharedNetwork
+
+        sn = SharedNetwork("test-atexit", internet=False)
+        try:
+            assert SharedNetwork._atexit_registered
+            assert sn in SharedNetwork._live_instances
+        finally:
+            sn.destroy()
+        assert sn not in SharedNetwork._live_instances

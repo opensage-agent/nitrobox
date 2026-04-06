@@ -18,6 +18,11 @@ use std::os::fd::IntoRawFd;
 use std::os::unix::fs::{OpenOptionsExt, symlink};
 use std::path::{Path, PathBuf};
 
+// Kernel overflow UID/GID — used when a tar entry's UID/GID falls outside
+// the user namespace idmap.  Matches /proc/sys/kernel/overflowuid (65534)
+// and Podman's ToHostOverflow() fallback (containers/storage PR #1220).
+const OVERFLOW_ID: u32 = 65534;
+
 // ======================================================================
 // Public API
 // ======================================================================
@@ -70,7 +75,10 @@ pub fn extract_tar_in_userns(
         );
         unsafe { libc::close(go_r) };
 
-        let code = match do_extract(&tar_data, dest) {
+        // sub_count + 1 = highest usable UID inside the namespace
+        // (0 is mapped to outer_uid, 1..sub_count mapped to sub_start..)
+        let max_id = sub_count;
+        let code = match do_extract(&tar_data, dest, max_id) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("nitrobox: layer extraction failed: {e}");
@@ -129,16 +137,16 @@ pub fn extract_tar_in_userns(
 // Child-side: Unpack() port  (archive.go:1089-1240)
 // ======================================================================
 
-fn do_extract(tar_data: &[u8], dest: &str) -> io::Result<()> {
+fn do_extract(tar_data: &[u8], dest: &str, max_id: u32) -> io::Result<()> {
     let cursor = io::Cursor::new(tar_data);
     let gz = flate2::read::GzDecoder::new(cursor);
     let is_gz = gz.header().is_some();
 
     if is_gz {
         let gz = flate2::read::GzDecoder::new(io::Cursor::new(tar_data));
-        unpack(gz, dest)
+        unpack(gz, dest, max_id)
     } else {
-        unpack(io::Cursor::new(tar_data), dest)
+        unpack(io::Cursor::new(tar_data), dest, max_id)
     }
 }
 
@@ -151,7 +159,7 @@ fn do_extract(tar_data: &[u8], dest: &str) -> io::Result<()> {
 ///   - Parent directory creation with chown (Podman lines 1133-1143)
 ///   - Directory mtime deferred to end (Podman lines 1211-1224)
 ///   - Existing file removal before overwrite (Podman lines 1157-1183)
-fn unpack<R: io::Read>(reader: R, dest: &str) -> io::Result<()> {
+fn unpack<R: io::Read>(reader: R, dest: &str, max_id: u32) -> io::Result<()> {
     let dest = Path::new(dest);
     let mut archive = tar::Archive::new(reader);
 
@@ -200,8 +208,15 @@ fn unpack<R: io::Read>(reader: R, dest: &str) -> io::Result<()> {
         }
 
         let entry_type = entry.header().entry_type();
-        let uid = entry.header().uid()?.try_into().unwrap_or(0u32);
-        let gid = entry.header().gid()?.try_into().unwrap_or(0u32);
+        let raw_uid: u32 = entry.header().uid()?.try_into().unwrap_or(0);
+        let raw_gid: u32 = entry.header().gid()?.try_into().unwrap_or(0);
+        // Podman: ToHostOverflow() falls back to the kernel overflow ID
+        // (65534 = nobody) for UIDs outside the userns idmap.  Without
+        // this, lchown returns EINVAL for unmapped UIDs (e.g. UID 197609
+        // from Windows-built tarballs in SWE-bench images).
+        // Ref: containers/storage pkg/idtools/idtools.go, PR #1220.
+        let uid = if raw_uid > max_id { OVERFLOW_ID } else { raw_uid };
+        let gid = if raw_gid > max_id { OVERFLOW_ID } else { raw_gid };
         let mode = entry.header().mode()?;
         let mtime = entry.header().mtime()? as i64;
 

@@ -280,6 +280,7 @@ class SandboxConfig:
     fs_backend: str = "overlayfs"
     env_base_dir: str = ""  # resolved in __post_init__
     rootfs_cache_dir: str = ""  # resolved in __post_init__
+    containerd_snapshot: bool = False  # Use containerd snapshot layers (build: images)
     read_only: bool = False
     tmpfs: list[str] = field(default_factory=list)
     shm_size: str | None = None
@@ -314,6 +315,7 @@ class SandboxConfig:
 
     # -- Special modes --
     vm_mode: bool = False  # Relaxed init for QEMU/KVM workloads
+    mask_paths: bool = True  # Mask sensitive /proc and /sys paths
 
     def __post_init__(self) -> None:
         if not self.env_base_dir:
