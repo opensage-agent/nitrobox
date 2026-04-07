@@ -806,11 +806,6 @@ class Sandbox:
         cls._live_instances.clear()
 
     @staticmethod
-    @staticmethod
-    def _force_rmtree(entry: Path) -> None:
-        """Remove a sandbox dir, handling overlay workdir perms and mapped UIDs."""
-        _force_rmtree(entry)
-
     def cleanup_stale(env_base_dir: str = "") -> int:
         """Clean up orphaned sandboxes left by crashed processes.
 
