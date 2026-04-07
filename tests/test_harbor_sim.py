@@ -1,7 +1,7 @@
 """Reproduce harbor's exact nitrobox workflow to find the crash.
 
 Run:
-  NITROBOX_USE_GO=1 CONTAINERS_STORAGE_ROOT=/tmp/nbx_store/graph \
+  CONTAINERS_STORAGE_ROOT=/tmp/nbx_store/graph \
   XDG_RUNTIME_DIR=/tmp/run-$(id -u) \
   PATH=src/nitrobox/_vendor:$PATH \
   DOCKER_CONFIG=~/.docker \

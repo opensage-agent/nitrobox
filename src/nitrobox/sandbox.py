@@ -342,7 +342,7 @@ class Sandbox:
 
         Uses ``nitrobox-core nsenter-exec`` to enter the sandbox's namespace
         and exec the command. This avoids ``preexec_fn`` which is incompatible
-        with the Go c-shared library (Go runtime breaks after fork).
+        with the Go binary (CGO constructor for namespace entry).
 
         Returns a :class:`subprocess.Popen` object with direct
         ``stdin``/``stdout``/``stderr`` pipes for bidirectional communication.
@@ -353,32 +353,27 @@ class Sandbox:
             cmd_args = ["sh", "-c", command]
 
         shell_pid = self._persistent_shell.pid
-        from nitrobox._gobin import gobin
-        core_bin = gobin()
 
-        # Use nitrobox-core with CGO constructor for namespace entry.
-        # The C constructor runs before Go's multi-threaded runtime starts,
-        # so it can do setns(CLONE_NEWUSER) (requires single-threaded caller).
-        # Same approach as runc's nsexec(). Triggered by _NITROBOX_NSENTER env var.
-        nsenter_env = dict(self._cached_env or {})
-        nsenter_env["_NITROBOX_NSENTER"] = str(shell_pid)
-        # Encode command args with newline separator (C constructor splits on \n)
-        nsenter_env["_NITROBOX_NSENTER_CMD"] = "\n".join(cmd_args)
+        # Use Rust preexec_fn to setns into the sandbox's namespaces.
+        # preexec_fn runs after fork (single-threaded child), so setns
+        # to CLONE_NEWUSER works (requires single-threaded caller).
         if self._userns:
-            nsenter_env["_NITROBOX_NSENTER_ROOTFS"] = str(self._rootfs)
-            nsenter_env["_NITROBOX_NSENTER_WORKDIR"] = self._config.working_dir or "/"
+            from nitrobox._core import py_userns_preexec
+            rootfs = str(self._rootfs)
+            workdir = self._config.working_dir or "/"
+            preexec = lambda: py_userns_preexec(shell_pid, rootfs, workdir)
         else:
-            nsenter_env["_NITROBOX_NSENTER_MODE"] = "rootful"
-        nsenter_cmd = [core_bin]
+            from nitrobox._core import py_nsenter_preexec
+            preexec = lambda: py_nsenter_preexec(shell_pid)
 
         defaults: dict[str, Any] = {
             "stdin": subprocess.PIPE,
             "stdout": subprocess.PIPE,
             "stderr": subprocess.PIPE,
-            "env": nsenter_env,
+            "preexec_fn": preexec,
         }
         defaults.update(kwargs)
-        proc = subprocess.Popen(nsenter_cmd, **defaults)
+        proc = subprocess.Popen(cmd_args, **defaults)
 
         logger.debug("popen pid=%d in sandbox: %s", proc.pid, cmd_args)
         return proc
