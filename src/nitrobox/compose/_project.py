@@ -325,6 +325,18 @@ class ComposeProject:
         if rmi is not None:
             self._remove_image_cache(rmi)
 
+        # Clean up empty sandbox base dir and containers-run stale locks
+        env_base = Path(f"/tmp/nitrobox_{os.getuid()}")
+        if env_base.exists() and not any(env_base.iterdir()):
+            try:
+                env_base.rmdir()
+            except OSError:
+                pass
+        run_root = Path(f"/tmp/nitrobox-containers-run-{os.getuid()}")
+        if run_root.exists() and (not env_base.exists() or not any(env_base.iterdir())):
+            import shutil
+            shutil.rmtree(run_root, ignore_errors=True)
+
         logger.info("ComposeProject %s: all services stopped", self._project_name)
 
     def _remove_image_cache(self, mode: str) -> None:
