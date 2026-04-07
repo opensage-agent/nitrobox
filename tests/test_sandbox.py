@@ -27,7 +27,7 @@ def _requires_root():
         pytest.skip("requires root")
 
 
-def _requires_docker():
+def _requires_gobin():
     """Skip if images cannot be pulled (needs Go binary or Docker daemon)."""
     from nitrobox._gobin import gobin
     bin_path = gobin()
@@ -41,7 +41,7 @@ def _requires_docker():
 @pytest.fixture
 def sandbox(tmp_path, shared_cache_dir):
     _requires_root()
-    _requires_docker()
+    _requires_gobin()
     config = SandboxConfig(
         image=TEST_IMAGE,
         working_dir="/workspace",
@@ -61,7 +61,7 @@ def sandbox(tmp_path, shared_cache_dir):
 class TestLifecycle:
     def test_create_and_delete(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             env_base_dir=str(tmp_path / "envs"),
@@ -106,7 +106,7 @@ class TestRun:
 
     def test_environment(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             environment={"MY_VAR": "test_value_123"},
@@ -255,7 +255,7 @@ class TestReset:
     def test_delete_cleans_dead_dirs(self, tmp_path, shared_cache_dir):
         """delete() removes all dead dirs left by rename-based reset."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -281,7 +281,7 @@ class TestReset:
 class TestConcurrency:
     def test_parallel_sandboxes(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         n = 2  # CI runners have limited resources
 
         def run_worker(i):
@@ -342,7 +342,7 @@ class TestPerformance:
 @pytest.fixture
 def tty_sandbox(tmp_path, shared_cache_dir):
     _requires_root()
-    _requires_docker()
+    _requires_gobin()
     config = SandboxConfig(
         image=TEST_IMAGE,
         working_dir="/workspace",
@@ -451,7 +451,7 @@ class TestNetIsolate:
     def test_loopback_only(self, tmp_path, shared_cache_dir):
         """With net_isolate, only loopback should exist."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -561,7 +561,7 @@ class TestSaveAsImage:
 class TestVolumes:
     def test_ro_volume(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         host_dir = tmp_path / "host_data"
         host_dir.mkdir()
         (host_dir / "file.txt").write_text("host_content")
@@ -587,7 +587,7 @@ class TestVolumes:
 
     def test_rw_volume(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         host_dir = tmp_path / "host_rw"
         host_dir.mkdir()
 
@@ -620,7 +620,7 @@ class TestObservability:
 
     def test_pressure(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -665,7 +665,7 @@ class TestFsIsolation:
     def test_two_sandboxes_isolated(self, tmp_path, shared_cache_dir):
         """Two sandboxes sharing the same image have independent filesystems."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -752,7 +752,7 @@ class TestResourceLimits:
     def test_memory_limit_enforced(self, tmp_path, shared_cache_dir):
         """A process exceeding memory_max should be killed or fail to allocate."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         if not _cgroup_v2_available():
             pytest.skip("cgroup v2 not available")
 
@@ -775,7 +775,7 @@ class TestResourceLimits:
     def test_pids_limit_enforced(self, tmp_path, shared_cache_dir):
         """pids_max should be correctly written to the cgroup."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         if not _cgroup_v2_available():
             pytest.skip("cgroup v2 not available")
 
@@ -801,7 +801,7 @@ class TestResourceLimits:
     def test_cpu_max_accepted(self, tmp_path, shared_cache_dir):
         """cpu_max config should not cause errors during sandbox creation."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         if not _cgroup_v2_available():
             pytest.skip("cgroup v2 not available")
 
@@ -919,7 +919,7 @@ class TestEdgeCases:
     def test_run_after_delete(self, tmp_path, shared_cache_dir):
         """Running a command after delete should fail gracefully."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1075,7 +1075,7 @@ class TestPortMap:
     def test_port_mapping(self, tmp_path, shared_cache_dir):
         """port_map forwards host port to sandbox server."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         _requires_tun()
         import urllib.request
 
@@ -1112,7 +1112,7 @@ class TestPortMap:
         """Loopback is automatically brought up inside net-isolated sandbox."""
         _requires_root()
         _requires_tun()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image="python:3.11-slim",
@@ -1146,7 +1146,7 @@ class TestPortMap:
         """delete() with port_map leaves no stale netns bind mounts (rootful)."""
         _requires_root()
         _requires_tun()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1170,7 +1170,7 @@ class TestPortMap:
         """delete() with port_map leaves no stale .netns bind mounts (userns)."""
         if os.geteuid() == 0:
             pytest.skip("userns test must run as non-root")
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1198,7 +1198,7 @@ class TestCleanupVerification:
     def test_delete_removes_all_files(self, tmp_path, shared_cache_dir):
         """delete() removes the entire env_dir, no leftovers."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1219,7 +1219,7 @@ class TestCleanupVerification:
     def test_delete_kills_shell_process(self, tmp_path, shared_cache_dir):
         """delete() kills the persistent shell process — no zombies."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1240,7 +1240,7 @@ class TestCleanupVerification:
     def test_reset_no_mount_leak(self, tmp_path, shared_cache_dir):
         """Multiple resets don't accumulate bind mounts."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1264,7 +1264,7 @@ class TestCleanupVerification:
     def test_delete_no_stale_cgroup(self, tmp_path, shared_cache_dir):
         """delete() removes the cgroup directory."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image=TEST_IMAGE,
@@ -1296,7 +1296,7 @@ class TestCleanupAfterCrash:
 
     def test_cleanup_stale_after_sigkill(self, tmp_path, shared_cache_dir):
         """SIGKILL the shell, then cleanup_stale should remove everything."""
-        _requires_docker()
+        _requires_gobin()
 
         env_dir = str(tmp_path / "envs")
         config = SandboxConfig(
@@ -1351,7 +1351,7 @@ class TestCleanupAfterCrash:
 
     def test_cleanup_stale_mapped_uid_files(self, tmp_path, shared_cache_dir):
         """Crash with mapped-UID files in overlay upper — cleanup must use rmtree_mapped."""
-        _requires_docker()
+        _requires_gobin()
 
         env_dir = str(tmp_path / "envs")
         config = SandboxConfig(
@@ -1383,7 +1383,7 @@ class TestCleanupAfterCrash:
 
     def test_cleanup_stale_multiple_crashed(self, tmp_path, shared_cache_dir):
         """Multiple crashed sandboxes cleaned in one call."""
-        _requires_docker()
+        _requires_gobin()
 
         env_dir = str(tmp_path / "envs")
         boxes = []
@@ -1409,7 +1409,7 @@ class TestCleanupAfterCrash:
 
     def test_cleanup_stale_orphan_no_pid(self, tmp_path, shared_cache_dir):
         """Sandbox dir with no .pid file (partial init crash) is cleaned."""
-        _requires_docker()
+        _requires_gobin()
 
         env_dir = str(tmp_path / "envs")
         config = SandboxConfig(
@@ -1446,7 +1446,7 @@ class TestLayerCache:
     def test_shared_layers(self, tmp_path, shared_cache_dir):
         """Two images sharing base layers reuse cached layers."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         cache_dir = Path(shared_cache_dir)
         configs = []
@@ -1480,7 +1480,7 @@ class TestLayerCache:
     def test_multi_layer_image(self, tmp_path, shared_cache_dir):
         """An image with many layers mounts and works correctly."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         config = SandboxConfig(
             image="python:3.11-slim",  # 4 layers
@@ -1515,7 +1515,7 @@ class TestClone3Fallback:
     def test_threading_works_with_seccomp(self, tmp_path, shared_cache_dir):
         """clone3 returns ENOSYS so glibc falls back to clone(2), allowing threads."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image="python:3.11-slim",
             working_dir="/tmp",
@@ -1549,7 +1549,7 @@ class TestHostname:
     def test_custom_hostname(self, tmp_path, shared_cache_dir):
         """hostname= sets the UTS hostname inside the sandbox."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         # CI containers may have /proc/sys/kernel/hostname read-only and
         # may lack the hostname binary; skip if neither method works.
         import subprocess
@@ -1582,7 +1582,7 @@ class TestDnsReset:
 
     def test_dns_survives_reset(self, tmp_path, shared_cache_dir):
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/workspace",
@@ -1610,7 +1610,7 @@ class TestReadOnly:
     def test_read_only_rootfs(self, tmp_path, shared_cache_dir):
         """read_only=True makes root filesystem read-only."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/",
@@ -1632,7 +1632,7 @@ class TestReadOnly:
     def test_read_only_survives_reset(self, tmp_path, shared_cache_dir):
         """read_only is preserved after reset()."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/",
@@ -1653,7 +1653,7 @@ class TestReadOnly:
     def test_read_only_without_seccomp(self, tmp_path, shared_cache_dir):
         """read_only works even when seccomp is disabled."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/",
@@ -2105,7 +2105,7 @@ class TestFromDockerRun:
 class TestGetImageConfig:
     def test_basic(self):
         """get_image_config returns cmd, entrypoint, env, working_dir."""
-        _requires_docker()
+        _requires_gobin()
         from nitrobox import get_image_config
         cfg = get_image_config("python:3.11-slim")
         assert cfg is not None
@@ -2128,7 +2128,7 @@ class TestDeleteCleansBackground:
     def test_delete_kills_background(self, tmp_path, shared_cache_dir):
         """delete() should kill background processes before unmounting."""
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
         config = SandboxConfig(
             image=TEST_IMAGE,
             working_dir="/",
@@ -2545,7 +2545,7 @@ class TestAsyncAPI:
         """Multiple arun() calls can run concurrently on different sandboxes."""
         import asyncio
         _requires_root()
-        _requires_docker()
+        _requires_gobin()
 
         async def worker(i):
             config = SandboxConfig(

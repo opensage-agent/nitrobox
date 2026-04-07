@@ -27,15 +27,12 @@ def _requires_helper():
         pytest.skip("CRIU not found. Run 'nitrobox setup'.")
 
 
-def _requires_docker():
-    """Skip if images cannot be pulled (needs Go binary or Docker daemon)."""
+def _requires_gobin():
+    """Skip if nitrobox-core Go binary is not available."""
     from nitrobox._gobin import gobin
     bin_path = gobin()
-    if os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
-        return
-    if subprocess.run(["docker", "info"], capture_output=True).returncode == 0:
-        return
-    pytest.skip("requires nitrobox-core Go binary or Docker daemon")
+    if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+        pytest.skip("requires nitrobox-core Go binary")
 
 
 def _requires_criu():
@@ -46,7 +43,7 @@ def _requires_criu():
 @pytest.fixture
 def sandbox(tmp_path, shared_cache_dir):
     _requires_helper()
-    _requires_docker()
+    _requires_gobin()
     _requires_criu()
     config = SandboxConfig(
         image=TEST_IMAGE,

@@ -18,15 +18,12 @@ def _skip_if_root():
         pytest.skip("CLI tests must run as non-root")
 
 
-def _requires_docker():
-    """Skip if images cannot be pulled (needs Go binary or Docker daemon)."""
+def _requires_gobin():
+    """Skip if nitrobox-core Go binary is not available."""
     from nitrobox._gobin import gobin
     bin_path = gobin()
-    if os.path.isfile(bin_path) and os.access(bin_path, os.X_OK):
-        return
-    if subprocess.run(["docker", "info"], capture_output=True).returncode == 0:
-        return
-    pytest.skip("requires nitrobox-core Go binary or Docker daemon")
+    if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
+        pytest.skip("requires nitrobox-core Go binary")
 
 
 def _nbx(*args: str) -> subprocess.CompletedProcess:
@@ -82,7 +79,7 @@ class TestCli:
     def test_kill_all(self, tmp_path, shared_cache_dir):
         """kill --all should kill all sandbox shells without killing us."""
         _skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         env_dir = str(tmp_path / "envs")
 
         sandboxes = []
@@ -107,7 +104,7 @@ class TestCli:
     def test_ps_shows_running_sandbox(self, tmp_path, shared_cache_dir):
         """ps should list a running sandbox."""
         _skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         env_dir = str(tmp_path / "envs")
         box = Sandbox(SandboxConfig(
             image=TEST_IMAGE,
@@ -125,7 +122,7 @@ class TestCli:
     def test_kill_and_cleanup(self, tmp_path, shared_cache_dir):
         """kill should terminate the sandbox shell and clean up the dir."""
         _skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         env_dir = str(tmp_path / "envs")
 
         # Create sandbox in subprocess
@@ -171,7 +168,7 @@ class TestCli:
     def test_kill_from_owner_process(self, tmp_path, shared_cache_dir):
         """nitrobox kill from the sandbox owner process should not kill itself."""
         _skip_if_root()
-        _requires_docker()
+        _requires_gobin()
         env_dir = str(tmp_path / "envs")
 
         box = Sandbox(SandboxConfig(
