@@ -104,17 +104,12 @@ pip install nitrobox
 
 ### Development build
 
-Requires [Rust](https://rustup.rs/), [Go](https://go.dev/), and [maturin](https://www.maturin.rs/):
+Requires [Rust](https://rustup.rs/), [Go 1.25+](https://go.dev/), and [maturin](https://www.maturin.rs/):
 
 ```bash
 pip install maturin
-maturin develop --release        # build Rust core + install in-place
-
-# Build Go binary (image management)
-cd go && go build -tags "exclude_graphdriver_btrfs containers_image_openpgp" \
-    -o nitrobox-core ./cmd/nitrobox-core/ && cd ..
-
-pytest tests/                    # run tests
+make dev    # builds Rust _core + Go nitrobox-core in one step
+make test   # run tests
 ```
 
 ## Quick start
