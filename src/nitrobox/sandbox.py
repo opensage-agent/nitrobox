@@ -649,6 +649,14 @@ class Sandbox:
             release_layer_locks(self._layer_lock_fds)
             self._layer_lock_fds = []
 
+        # Clean up empty base dir
+        env_base = self._env_dir.parent
+        if env_base.exists() and not any(env_base.iterdir()):
+            try:
+                env_base.rmdir()
+            except OSError:
+                pass
+
         self._unregister(self)
 
         elapsed_ms = (time.monotonic() - t0) * 1000
@@ -915,6 +923,20 @@ class Sandbox:
 
             _force_rmtree(entry)
             cleaned += 1
+
+        # Clean up empty base dir
+        if base.exists() and not any(base.iterdir()):
+            try:
+                base.rmdir()
+            except OSError:
+                pass
+
+        # Clean up containers/storage run root (stale locks/state)
+        run_root = Path(f"/tmp/nitrobox-containers-run-{os.getuid()}")
+        if run_root.exists():
+            # Only clean if no sandboxes are running
+            if not base.exists() or not any(base.iterdir()):
+                shutil.rmtree(run_root, ignore_errors=True)
 
         if cleaned:
             logger.info("Cleaned up %d stale sandbox(es) under %s", cleaned, env_base_dir)
@@ -1489,11 +1511,23 @@ class Sandbox:
     def _cleanup_cgroup(self) -> None:
         if not self._cgroup_path or not self._cgroup_path.exists():
             return
+        from nitrobox._core import py_cleanup_cgroup
         try:
-            from nitrobox._core import py_cleanup_cgroup
             py_cleanup_cgroup(str(self._cgroup_path))
-        except OSError as e:
-            logger.debug("cgroup cleanup (non-fatal): %s", e)
+        except OSError:
+            pass
+        # Rust retries for 200ms which may not be enough if processes are
+        # still exiting.  Retry in Python for up to 2s total.
+        for _ in range(20):
+            if not self._cgroup_path.exists():
+                return
+            try:
+                self._cgroup_path.rmdir()
+                return
+            except OSError:
+                time.sleep(0.1)
+        if self._cgroup_path.exists():
+            logger.warning("cgroup not cleaned: %s", self._cgroup_path)
 
     # -- rootless cgroup via delegation -------------------------------- #
 
