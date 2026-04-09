@@ -202,12 +202,12 @@ def _print_results(
     print(
         f"| {'C':>3} | {'Env':>8} | {'Wall':>9} | "
         f"{'EnvSetup':>14} | {'AgtSetup':>14} | {'Agent':>14} | "
-        f"{'Verify':>14} | {'Teardown':>14} | {'Overhead':>8} | "
+        f"{'LLM':>14} | {'Verify':>14} | {'Teardown':>14} | {'Overhead':>8} | "
         f"{'Pass':>4} | {'Fail':>4} | {'Err':>4} |"
     )
     print(f"|{'-' * 5}|{'-' * 10}|{'-' * 11}|"
           f"{'-' * 16}|{'-' * 16}|{'-' * 16}|"
-          f"{'-' * 16}|{'-' * 16}|{'-' * 10}|"
+          f"{'-' * 16}|{'-' * 16}|{'-' * 16}|{'-' * 10}|"
           f"{'-' * 6}|{'-' * 6}|{'-' * 6}|")
 
     for c in concurrency_levels:
@@ -238,7 +238,7 @@ def _print_results(
             print(
                 f"| {c:>3} | {env_type:>8} | {wall:>8.1f}s | "
                 f"{_fmt(env_s):>14} | {_fmt(agt_s):>14} | {_fmt(agt_x):>14} | "
-                f"{_fmt(vfy):>14} | {_fmt(tear):>14} | {overhead_pct:>7.0f}% | "
+                f"{_fmt(llm):>14} | {_fmt(vfy):>14} | {_fmt(tear):>14} | {overhead_pct:>7.0f}% | "
                 f"{pass_n:>4} | {fail_n:>4} | {err_n:>4} |"
             )
 

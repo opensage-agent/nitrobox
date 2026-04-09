@@ -51,18 +51,22 @@ blocked by sudo password issue in VM). Correctness parity confirmed.
 
 ## Reproduce
 
-Requires OSWorld's `--api_provider` PR
-([xlang-ai/OSWorld#485](https://github.com/xlang-ai/OSWorld/pull/485)).
-
 ```bash
-# Run e2e comparison (Claude Sonnet 4.6, 10 tasks)
+# 1. Clone our OSWorld fork (includes nitrobox provider + --api_provider fix)
+git clone -b nitrobox-provider https://github.com/rucnyz/OSWorld.git
+cd OSWorld && pip install -r requirements.txt
+
+# 2. Verify KVM access
+test -w /dev/kvm && echo "KVM OK"
+
+# 3. Run e2e comparison (Claude Sonnet 4.6, 10 tasks)
 ANTHROPIC_API_KEY=sk-ant-... python examples/bench_osworld_e2e.py \
     --osworld-dir /path/to/osworld \
     --n-tasks 10 --max-steps 30 \
     --envs docker,nitrobox \
     --concurrency 10
 
-# Concurrent VM reset benchmark
+# 4. Concurrent VM reset benchmark
 python examples/bench_osworld_concurrent.py \
     --qcow2 /path/to/Ubuntu.qcow2 \
     --concurrency 1,4,8,16

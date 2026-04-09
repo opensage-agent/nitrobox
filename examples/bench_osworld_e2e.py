@@ -66,7 +66,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -109,242 +108,79 @@ def _create_task_subset(osworld_dir: str, n_tasks: int) -> str:
     return str(out_path)
 
 
-def _ensure_nitrobox_provider(osworld_dir: str) -> None:
-    """Write nitrobox provider module if it doesn't exist yet."""
-    dst = Path(osworld_dir) / "desktop_env" / "providers" / "nitrobox"
-    if dst.exists():
-        return
-    dst.mkdir(parents=True, exist_ok=True)
-    _write_provider_files(dst)
 
 
-def _write_provider_files(dst: Path) -> None:
-    """Write the nitrobox provider files (inline, no external dependency)."""
-    (dst / "__init__.py").write_text("")
-
-    (dst / "manager.py").write_text('''\
-"""VM manager for nitrobox QemuVM provider."""
-import os
-from desktop_env.providers.base import VMManager
-from desktop_env.providers.docker.manager import _download_vm, VMS_DIR, UBUNTU_X86_URL, WINDOWS_X86_URL
-
-class NitroboxVMManager(VMManager):
-    def __init__(self, registry_path=""): pass
-    def add_vm(self, vm_path): pass
-    def check_and_clean(self): pass
-    def delete_vm(self, vm_path, region=None, **kwargs): pass
-    def initialize_registry(self): pass
-    def list_free_vms(self): return os.path.join(VMS_DIR, "Ubuntu.qcow2")
-    def occupy_vm(self, vm_path, pid, region=None, **kwargs): pass
-    def get_vm_path(self, os_type, region, screen_size=(1920, 1080), **kwargs):
-        url = UBUNTU_X86_URL if os_type == "Ubuntu" else WINDOWS_X86_URL
-        fn = url.split("/")[-1]
-        vm_name = fn[:-4] if fn.endswith(".zip") else fn
-        if not os.path.exists(os.path.join(VMS_DIR, vm_name)):
-            _download_vm(VMS_DIR)
-        return os.path.join(VMS_DIR, vm_name)
-''')
-
-    (dst / "provider.py").write_text('''\
-"""nitrobox QemuVM provider for OSWorld — loadvm-based instant reset."""
-import json, logging, os, socket, subprocess, time
-import requests
-from filelock import FileLock
-from pathlib import Path
-from desktop_env.providers.base import Provider
-
-logger = logging.getLogger("desktopenv.providers.nitrobox.NitroboxProvider")
-SNAPSHOT_TAG = "nitrobox_ready"
-
-class NitroboxProvider(Provider):
-    def __init__(self, region=None):
-        super().__init__(region)
-        self.qemu_proc = None
-        self.qmp_sock = None
-        self.server_port = self.vnc_port = self.chromium_port = self.vlc_port = None
-        self._has_snapshot = False
-        self.lock_file = Path("/tmp/nitrobox_port_allocation.lck")
-
-    def _get_available_port(self, start):
-        import psutil
-        used = set(c.laddr.port for c in psutil.net_connections())
-        p = start
-        while p < 65354:
-            if p not in used: return p
-            p += 1
-        raise RuntimeError(f"No ports from {start}")
-
-    def _qmp_send(self, command, arguments=None):
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(120); s.connect(self.qmp_sock); s.recv(4096)
-        s.sendall(b\'{"execute": "qmp_capabilities"}\\n\'); s.recv(4096)
-        msg = {"execute": command}
-        if arguments: msg["arguments"] = arguments
-        s.sendall(json.dumps(msg).encode() + b"\\n")
-        data = b""
-        while True:
-            chunk = s.recv(4096)
-            if not chunk: break
-            data += chunk
-            if b\'"return"\' in data or b\'"error"\' in data: break
-        s.close()
-        for line in data.decode(errors="ignore").strip().split("\\n"):
-            line = line.strip()
-            if not line: continue
-            try:
-                obj = json.loads(line)
-                if "return" in obj or "error" in obj: return obj
-            except json.JSONDecodeError: continue
-        return {"return": {}}
-
-    def _hmp(self, command):
-        resp = self._qmp_send("human-monitor-command", {"command-line": command})
-        if "error" in resp: raise RuntimeError(f"HMP failed: {resp[\'error\']}")
-        return resp.get("return", "")
-
-    def _wait_for_vm_ready(self, timeout=300):
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            try:
-                r = requests.get(f"http://localhost:{self.server_port}/screenshot", timeout=(10,10))
-                if r.status_code == 200: return
-            except Exception: pass
-            time.sleep(1)
-        raise TimeoutError("VM not ready")
-
-    def start_emulator(self, path_to_vm, headless, os_type="Ubuntu"):
-        if self.qemu_proc and self.qemu_proc.poll() is None:
-            return  # Already running after loadvm
-        lock = FileLock(str(self.lock_file), timeout=10)
-        try:
-            with lock:
-                self.server_port = self._get_available_port(5000)
-                self.chromium_port = self._get_available_port(9222)
-                self.vnc_port = self._get_available_port(8006)
-                self.vlc_port = self._get_available_port(8080)
-        except Exception:
-            pid_off = os.getpid() % 1000
-            self.server_port, self.chromium_port = 15000+pid_off, 19222+pid_off
-            self.vnc_port, self.vlc_port = 18006+pid_off, 18080+pid_off
-        self.qmp_sock = f"/tmp/nitrobox_osworld_qmp_{self.server_port}.sock"
-        try: os.unlink(self.qmp_sock)
-        except FileNotFoundError: pass
-        hostfwd = (f"hostfwd=tcp::{self.server_port}-:5000,"
-                   f"hostfwd=tcp::{self.chromium_port}-:9222,"
-                   f"hostfwd=tcp::{self.vnc_port}-:8006,"
-                   f"hostfwd=tcp::{self.vlc_port}-:8080")
-        cmd = ["qemu-system-x86_64", "-enable-kvm", "-m", "4G", "-smp", "4",
-               "-drive", f"file={path_to_vm},format=qcow2,if=virtio,snapshot=on",
-               "-qmp", f"unix:{self.qmp_sock},server,nowait",
-               "-display", "none", "-serial", "null", "-no-shutdown", "-nographic",
-               "-device", "virtio-vga", "-nic", f"user,{hostfwd}"]
-        self.qemu_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        deadline = time.monotonic() + 120
-        while time.monotonic() < deadline:
-            if os.path.exists(self.qmp_sock):
-                try: self._qmp_send("query-status"); break
-                except Exception: pass
-            time.sleep(0.2)
-        else: self.qemu_proc.kill(); raise TimeoutError("QMP not ready")
-        if self._has_snapshot:
-            self._hmp(f"loadvm {SNAPSHOT_TAG}")
-        else:
-            self._wait_for_vm_ready()
-            self._hmp(f"savevm {SNAPSHOT_TAG}")
-            self._qmp_send("cont")  # savevm pauses VM
-            self._has_snapshot = True
-
-    def get_ip_address(self, path_to_vm):
-        return f"localhost:{self.server_port}:{self.chromium_port}:{self.vnc_port}:{self.vlc_port}"
-
-    def save_state(self, path_to_vm, snapshot_name):
-        self._hmp(f"savevm {snapshot_name}")
-        self._qmp_send("cont")
-
-    def revert_to_snapshot(self, path_to_vm, snapshot_name):
-        if self.qemu_proc and self.qemu_proc.poll() is None:
-            tag = SNAPSHOT_TAG if self._has_snapshot else snapshot_name
-            self._hmp(f"loadvm {tag}")
-        else:
-            self.stop_emulator(path_to_vm)
-            self.start_emulator(path_to_vm, headless=True)
-
-    def stop_emulator(self, path_to_vm, region=None, *args, **kwargs):
-        if self.qemu_proc:
-            try: self._qmp_send("quit")
-            except Exception: pass
-            try: self.qemu_proc.wait(timeout=10)
-            except subprocess.TimeoutExpired: self.qemu_proc.kill(); self.qemu_proc.wait()
-            self.qemu_proc = None
-        if self.qmp_sock:
-            try: os.unlink(self.qmp_sock)
-            except FileNotFoundError: pass
-        self.server_port = self.vnc_port = self.chromium_port = self.vlc_port = None
-''')
-
-
-_RUNNER_WRAPPER = '''\
-"""Wrapper: monkey-patches OSWorld to accept 'nitrobox' provider, then runs the Claude runner."""
-import sys, os, argparse
+_TIMING_WRAPPER = '''\
+"""Wrapper: patches run_single_example to emit timing.json, then runs the Claude runner."""
+import sys, os, json, time
 sys.path.insert(0, os.getcwd())
 
-# 1. Patch argparse so --provider_name accepts "nitrobox"
-_orig_add_arg = argparse.ArgumentParser.add_argument
-def _patched_add_arg(self, *a, **kw):
-    if a and a[0] == "--provider_name" and "choices" in kw:
-        choices = list(kw["choices"])
-        if "nitrobox" not in choices:
-            choices.append("nitrobox")
-        kw["choices"] = choices
-    return _orig_add_arg(self, *a, **kw)
-argparse.ArgumentParser.add_argument = _patched_add_arg
-
-# 2. Patch provider registry to return nitrobox provider
-import desktop_env.providers as _prov
-_orig_get = _prov.get_provider
-def _patched_get(provider_name, region="us-east-1"):
-    if provider_name == "nitrobox":
-        from desktop_env.providers.nitrobox.manager import NitroboxVMManager
-        from desktop_env.providers.nitrobox.provider import NitroboxProvider
-        return NitroboxVMManager(), NitroboxProvider(region)
-    return _orig_get(provider_name, region)
-_prov.get_provider = _patched_get
-
-# 3. Patch DesktopEnv to accept nitrobox (treat like vmware for validation)
-import desktop_env.desktop_env as _de
-_orig_init = _de.DesktopEnv.__init__
-def _patched_init(self, *a, **kw):
-    if kw.get("provider_name") == "nitrobox":
-        kw = dict(kw, provider_name="vmware")
-        _orig_init(self, *a, **kw)
-        self.provider_name = "nitrobox"
-    else:
-        _orig_init(self, *a, **kw)
-_de.DesktopEnv.__init__ = _patched_init
+import lib_run_single as _lrs
+_orig_run = _lrs.run_single_example
+def _timed_run(agent, env, example, max_steps, instruction, args, example_result_dir, scores):
+    t0 = time.monotonic()
+    env.reset(task_config=example)
+    try:
+        agent.reset(_lrs.setup_logger(example, example_result_dir), vm_ip=env.vm_ip)
+    except Exception:
+        agent.reset(vm_ip=env.vm_ip)
+    t_setup = time.monotonic()
+    import datetime as _dt
+    _lrs.time.sleep(60)
+    obs = env._get_obs()
+    done = False
+    step_idx = 0
+    env.controller.start_recording()
+    llm_total = 0.0
+    while not done and step_idx < max_steps:
+        _t_llm = time.monotonic()
+        response, actions = agent.predict(instruction, obs)
+        llm_total += time.monotonic() - _t_llm
+        for action in actions:
+            action_timestamp = _dt.datetime.now().strftime("%Y%m%d@%H%M%S%f")
+            obs, reward, done, info = env.step(action, args.sleep_after_execution)
+            with open(os.path.join(example_result_dir, f"step_{step_idx+1}_{action_timestamp}.png"), "wb") as _f:
+                _f.write(obs["screenshot"])
+            with open(os.path.join(example_result_dir, "traj.jsonl"), "a") as f:
+                f.write(json.dumps({"step_num": step_idx+1, "action_timestamp": action_timestamp,
+                    "action": action, "response": response, "reward": reward, "done": done,
+                    "info": info, "screenshot_file": f"step_{step_idx+1}_{action_timestamp}.png"}) + "\\n")
+            if done:
+                break
+        step_idx += 1
+    t_agent = time.monotonic()
+    _lrs.time.sleep(20)
+    result = env.evaluate()
+    t_verify = time.monotonic()
+    scores.append(result)
+    with open(os.path.join(example_result_dir, "result.txt"), "w") as f:
+        f.write(f"{result}\\n")
+    from lib_results_logger import log_task_completion
+    log_task_completion(example, result, example_result_dir, args)
+    env.controller.end_recording(os.path.join(example_result_dir, "recording.mp4"))
+    t_teardown = time.monotonic()
+    with open(os.path.join(example_result_dir, "timing.json"), "w") as f:
+        json.dump({"environment_setup": t_setup - t0, "agent_execution": t_agent - t_setup,
+                   "verifier": t_verify - t_agent, "teardown": t_teardown - t_verify,
+                   "llm_inference": llm_total, "n_steps": step_idx}, f)
+_lrs.run_single_example = _timed_run
 
 # Run the Claude runner
 import runpy
 runpy.run_path("scripts/python/run_multienv_claude.py", run_name="__main__")
 '''
 
-
 def run_osworld(
     osworld_dir: str, provider: str, task_file: str,
     result_dir: str, model: str, max_steps: int, num_envs: int,
 ) -> dict:
     """Run OSWorld evaluation and return timing + results."""
-    # For nitrobox provider, use a wrapper that monkey-patches the registration.
-    # For docker/aws, call the runner directly.
-    if provider == "nitrobox":
-        _ensure_nitrobox_provider(osworld_dir)
-        wrapper = Path(osworld_dir) / ".nitrobox_runner.py"
-        wrapper.write_text(_RUNNER_WRAPPER)
-        script = str(wrapper)
-    else:
-        script = "scripts/python/run_multienv_claude.py"
+    # Write timing wrapper that injects timing.json into run_single_example
+    wrapper = Path(osworld_dir) / ".timing_runner.py"
+    wrapper.write_text(_TIMING_WRAPPER)
 
     cmd = [
-        sys.executable, "-B", "-u", script,
+        sys.executable, "-B", "-u", str(wrapper),
         "--provider_name", provider,
         "--api_provider", "anthropic",
         "--headless",
@@ -382,6 +218,8 @@ def _parse_results(result_base: Path, wall_time: float) -> dict:
             "environment_setup": [],
             "agent_execution": [],
             "verifier": [],
+            "teardown": [],
+            "llm_inference": [],
             "n_steps": [],
         },
     }
@@ -411,7 +249,7 @@ def _parse_results(result_base: Path, wall_time: float) -> dict:
         if timing_file.exists():
             try:
                 t = json.loads(timing_file.read_text())
-                for phase in ["environment_setup", "agent_execution", "verifier"]:
+                for phase in ["environment_setup", "agent_execution", "verifier", "teardown", "llm_inference"]:
                     if phase in t:
                         results["phases"][phase].append(t[phase])
                 if "n_steps" in t:
@@ -426,66 +264,101 @@ def _mean(vals: list[float]) -> float:
     return sum(vals) / len(vals) if vals else 0.0
 
 
-def _format_results_table(docker: dict, nitrobox: dict) -> str:
+def _format_results_table(
+    all_results: dict[str, dict],
+    concurrency: int,
+    env_types: list[str],
+) -> str:
     """Format results as markdown table (matching harbor e2e format)."""
     lines = []
 
-    # Overall
+    def _fmt(val: float, total: float) -> str:
+        pct = val / total * 100 if total > 0 else 0
+        return f"{val:.1f}s ({pct:.0f}%)"
+
+    # Main table
     lines.append(
-        f"| {'Env':>8} | {'Tasks':>5} | {'Pass':>4} | {'Fail':>4} | "
-        f"{'Rate':>5} | {'Errors':>6} | {'Steps/task':>10} |"
+        f"| {'C':>3} | {'Env':>8} | {'Wall':>9} | "
+        f"{'EnvSetup':>14} | {'Agent':>14} | "
+        f"{'LLM':>14} | {'Verify':>14} | {'Teardown':>14} | {'Overhead':>8} | "
+        f"{'Pass':>4} | {'Fail':>4} | {'Err':>4} |"
     )
     lines.append(
-        f"|{'-'*10}|{'-'*7}|{'-'*6}|{'-'*6}|{'-'*7}|{'-'*8}|{'-'*12}|"
+        f"|{'-'*5}|{'-'*10}|{'-'*11}|"
+        f"{'-'*16}|{'-'*16}|"
+        f"{'-'*16}|{'-'*16}|{'-'*16}|{'-'*10}|"
+        f"{'-'*6}|{'-'*6}|{'-'*6}|"
     )
-    for name, r in [("Docker", docker), ("nitrobox", nitrobox)]:
-        rate = r['pass'] / r['tasks'] * 100 if r['tasks'] else 0
-        n_steps = _mean(r.get("phases", {}).get("n_steps", []))
-        steps_str = f"{n_steps:.1f}" if n_steps > 0 else "—"
+    for env_type in env_types:
+        r = all_results.get(env_type)
+        if not r or r["tasks"] == 0:
+            continue
+        p = r.get("phases", {})
+        wall = r["wall_time_s"]
+        setup = _mean(p.get("environment_setup", []))
+        agent = _mean(p.get("agent_execution", []))
+        verify = _mean(p.get("verifier", []))
+        tear = _mean(p.get("teardown", []))
+        llm = _mean(p.get("llm_inference", []))
+        total = setup + agent + verify + tear
+        overhead_pct = (total - llm) / total * 100 if total > 0 else 0
         lines.append(
-            f"| {name:>8} | {r['tasks']:>5} | {r['pass']:>4} | {r['fail']:>4} | "
-            f"{rate:>4.1f}% | {r['errors']:>6} | {steps_str:>10} |"
+            f"| {concurrency:>3} | {env_type:>8} | {wall:>8.1f}s | "
+            f"{_fmt(setup, total):>14} | {_fmt(agent, total):>14} | "
+            f"{_fmt(llm, total):>14} | {_fmt(verify, total):>14} | {_fmt(tear, total):>14} | {overhead_pct:>7.0f}% | "
+            f"{r['pass']:>4} | {r['fail']:>4} | {r['errors']:>4} |"
         )
 
-    # Phase timing breakdown (if timing.json available)
-    has_phases = any(
-        r.get("phases", {}).get("environment_setup", [])
-        for r in [docker, nitrobox]
-    )
-    if has_phases:
-        lines.append("")
-        lines.append("Phase breakdown (from timing.json, provider-relevant metric in bold):")
-        lines.append(
-            f"| {'Env':>8} | {'**Setup**':>9} | {'Agent':>7} | {'Verify':>7} | "
-            f"{'Overhead':>8} |"
-        )
-        lines.append(
-            f"|{'-'*10}|{'-'*11}|{'-'*9}|{'-'*9}|{'-'*10}|"
-        )
-        for name, r in [("Docker", docker), ("nitrobox", nitrobox)]:
-            p = r.get("phases", {})
-            setup = _mean(p.get("environment_setup", []))
-            agent = _mean(p.get("agent_execution", []))
-            verify = _mean(p.get("verifier", []))
-            total = setup + agent + verify
-            overhead = setup / total * 100 if total > 0 else 0
-            if setup > 0:
-                lines.append(
-                    f"| {name:>8} | {setup:>7.1f}s | {agent:>5.1f}s | {verify:>5.1f}s | "
-                    f"{overhead:>6.1f}% |"
-                )
+    # Per-task breakdown with bar chart
+    lines.append("\nPer-task breakdown (mean):")
+    for env_type in env_types:
+        r = all_results.get(env_type)
+        if not r or r["tasks"] == 0:
+            continue
+        p = r.get("phases", {})
+        setup = _mean(p.get("environment_setup", []))
+        agent = _mean(p.get("agent_execution", []))
+        llm = _mean(p.get("llm_inference", []))
+        verify = _mean(p.get("verifier", []))
+        tear = _mean(p.get("teardown", []))
+        total = setup + agent + verify + tear
+        overhead_pct = (total - llm) / total * 100 if total > 0 else 0
+        if total <= 0:
+            continue
+        lines.append(f"  {env_type} c={concurrency} (total {total:.1f}s, overhead {overhead_pct:.0f}%):")
+        for label, val in [("env_setup", setup), ("agent_exec", agent),
+                           ("  llm_inference", llm), ("verifier", verify),
+                           ("teardown", tear)]:
+            pct = val / total * 100
+            bar = "#" * int(pct / 2)
+            lines.append(f"          {label:>12}:  {val:>5.1f}s ({pct:>5.1f}%) {bar}")
+
+    # Speedup
+    envs_with_data = [e for e in env_types if all_results.get(e, {}).get("tasks", 0) > 0]
+    if len(envs_with_data) == 2:
+        a, b = envs_with_data
+        wa, wb = all_results[a]["wall_time_s"], all_results[b]["wall_time_s"]
+        if wb > 0:
+            lines.append(f"\nSpeedup (wall-clock):")
+            lines.append(f"  c={concurrency}: {a} {wa:.1f}s vs {b} {wb:.1f}s = {wa/wb:.2f}x")
 
     # Per-domain
     lines.append("")
-    all_domains = sorted(set(list(docker["per_domain"].keys()) + list(nitrobox["per_domain"].keys())))
-    lines.append(f"| {'Domain':>20} | {'Docker':>8} | {'nitrobox':>8} |")
-    lines.append(f"|{'-'*22}|{'-'*10}|{'-'*10}|")
+    all_domains = sorted(set(
+        d for e in env_types for d in all_results.get(e, {}).get("per_domain", {}).keys()
+    ))
+    header = f"| {'Domain':>20} |"
+    for e in env_types:
+        header += f" {e:>8} |"
+    lines.append(header)
+    lines.append(f"|{'-'*22}|" + f"{'-'*10}|" * len(env_types))
     for domain in all_domains:
-        dd = docker["per_domain"].get(domain, {"tasks": 0, "pass": 0})
-        nd = nitrobox["per_domain"].get(domain, {"tasks": 0, "pass": 0})
-        d_str = f"{dd['pass']}/{dd['tasks']}" if dd['tasks'] else "—"
-        n_str = f"{nd['pass']}/{nd['tasks']}" if nd['tasks'] else "—"
-        lines.append(f"| {domain:>20} | {d_str:>8} | {n_str:>8} |")
+        row = f"| {domain:>20} |"
+        for e in env_types:
+            dd = all_results.get(e, {}).get("per_domain", {}).get(domain, {"tasks": 0, "pass": 0})
+            s = f"{dd['pass']}/{dd['tasks']}" if dd['tasks'] else "—"
+            row += f" {s:>8} |"
+        lines.append(row)
 
     return "\n".join(lines)
 
@@ -523,8 +396,10 @@ def main():
     _env_to_provider = {"docker": "docker", "nitrobox": "nitrobox"}
 
     if args.parse_only:
-        docker = _parse_results(Path(osworld_dir) / args.parse_only[0], 0)
-        nitrobox = _parse_results(Path(osworld_dir) / args.parse_only[1], 0)
+        all_results = {
+            envs[0]: _parse_results(Path(osworld_dir) / args.parse_only[0], 0),
+            envs[1]: _parse_results(Path(osworld_dir) / args.parse_only[1], 0),
+        }
     else:
         task_file = _create_task_subset(osworld_dir, args.n_tasks)
         print(f"  Task file:   {task_file}")
@@ -539,31 +414,28 @@ def main():
             all_results[env] = r
             print(f"  Done: {r['wall_time_s']:.0f}s, {r['tasks']} tasks, {r['pass']} pass")
 
-        docker = all_results.get("docker", {"tasks": 0, "pass": 0, "fail": 0,
-                                             "errors": 0, "per_domain": {}, "scores": []})
-        nitrobox = all_results.get("nitrobox", docker)
-
     # Results
-    print("\n" + "=" * 68)
+    print("\n" + "=" * 100)
     print("RESULTS")
-    print("=" * 68 + "\n")
-    print(_format_results_table(docker, nitrobox))
+    print("=" * 100 + "\n")
+    print(_format_results_table(all_results, args.concurrency, envs))
 
     # Correctness
-    d_rate = docker['pass'] / docker['tasks'] * 100 if docker['tasks'] else 0
-    n_rate = nitrobox['pass'] / nitrobox['tasks'] * 100 if nitrobox['tasks'] else 0
-
+    rates = {e: r['pass'] / r['tasks'] * 100 if r['tasks'] else 0
+             for e, r in all_results.items()}
+    vals = list(rates.values())
     print(f"\nCorrectness:")
-    if abs(d_rate - n_rate) < 5.0 and docker['tasks'] > 0:
-        print(f"  Pass rates match: Docker {d_rate:.1f}% vs nitrobox {n_rate:.1f}%")
-    elif docker['tasks'] == 0:
-        print(f"  nitrobox only: {n_rate:.1f}% pass rate")
+    if len(vals) == 2 and abs(vals[0] - vals[1]) < 5.0 and vals[0] > 0:
+        e1, e2 = list(rates.keys())
+        print(f"  c={args.concurrency}: {e1} {all_results[e1]['pass']} pass ({all_results[e1]['errors']} err), "
+              f"{e2} {all_results[e2]['pass']} pass ({all_results[e2]['errors']} err) — MATCH")
     else:
-        print(f"  Pass rates differ: Docker {d_rate:.1f}% vs nitrobox {n_rate:.1f}%")
+        for e, rate in rates.items():
+            print(f"  {e}: {rate:.1f}% ({all_results[e]['pass']}/{all_results[e]['tasks']})")
 
     if args.output:
         with open(args.output, "w") as f:
-            json.dump({"docker": docker, "nitrobox": nitrobox}, f, indent=2, default=str)
+            json.dump(all_results, f, indent=2, default=str)
         print(f"\nResults saved to {args.output}")
 
 
