@@ -1,45 +1,45 @@
 {
   "docker": {
-    "wall_time_s": 1900.2226564540006,
+    "wall_time_s": 429.3479142129945,
     "tasks": 10,
-    "pass": 0,
-    "fail": 10,
+    "pass": 9,
+    "fail": 1,
     "errors": 0,
     "per_domain": {
       "multi_apps": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "gimp": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "libreoffice_calc": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "vs_code": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "libreoffice_impress": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "chrome": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "vlc": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "os": {
         "tasks": 1,
@@ -48,26 +48,26 @@
       },
       "libreoffice_writer": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "thunderbird": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       }
     },
     "scores": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
       0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0
+      1.0,
+      1.0
     ],
     "phases": {
       "environment_setup": [],
@@ -77,46 +77,46 @@
     }
   },
   "nitrobox": {
-    "wall_time_s": 1702.591299273001,
+    "wall_time_s": 440.8980592769949,
     "tasks": 10,
-    "pass": 0,
-    "fail": 10,
+    "pass": 9,
+    "fail": 1,
     "errors": 0,
     "per_domain": {
       "multi_apps": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "gimp": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "libreoffice_calc": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "vs_code": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "libreoffice_impress": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "chrome": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "vlc": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "os": {
         "tasks": 1,
@@ -125,26 +125,26 @@
       },
       "libreoffice_writer": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       },
       "thunderbird": {
         "tasks": 1,
-        "pass": 0,
-        "fail": 1
+        "pass": 1,
+        "fail": 0
       }
     },
     "scores": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
       0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0,
-      0.0
+      1.0,
+      1.0
     ],
     "phases": {
       "environment_setup": [],

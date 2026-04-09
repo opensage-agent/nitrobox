@@ -8,36 +8,34 @@ nitrobox uses QEMU loadvm for instant VM reset (~2.5s) instead of
 Docker's container destroy+recreate+reboot cycle (~17s).  Both providers
 run the same OSWorld Ubuntu Desktop qcow2 image with QEMU/KVM.
 
+Requires OSWorld's --api_provider PR (https://github.com/xlang-ai/OSWorld/pull/485).
+
 Setup:
     # 1. Clone OSWorld
     git clone https://github.com/xlang-ai/osworld.git
     cd osworld && pip install -r requirements.txt
 
-    # 2. Install the nitrobox provider into OSWorld
-    #    (copies provider.py and manager.py into desktop_env/providers/adl/)
-    python examples/bench_osworld_e2e.py --install-provider --osworld-dir /path/to/osworld
-
-    # 3. Download Ubuntu VM image (~13GB, auto-downloaded on first run)
+    # 2. Download Ubuntu VM image (~13GB, auto-downloaded on first run)
     docker pull happysixd/osworld-docker
 
-    # 4. Verify KVM access
+    # 3. Verify KVM access
     test -w /dev/kvm && echo "KVM OK"
 
 Usage:
-    # Full comparison (100 tasks, Claude Computer Use agent)
+    # Full comparison (100 tasks, Claude Sonnet 4.6 Computer Use agent)
     ANTHROPIC_API_KEY=sk-ant-... python examples/bench_osworld_e2e.py \\
         --osworld-dir /path/to/osworld \\
-        --n-tasks 100 --max-steps 100
+        --n-tasks 100 --max-steps 30
 
     # Quick smoke test (10 tasks)
     ANTHROPIC_API_KEY=sk-ant-... python examples/bench_osworld_e2e.py \\
         --osworld-dir /path/to/osworld \\
-        --n-tasks 10 --max-steps 100
+        --n-tasks 10 --max-steps 30
 
     # Parse existing results only (no re-run)
     python examples/bench_osworld_e2e.py \\
         --osworld-dir /path/to/osworld \\
-        --parse-only results_docker_100 results_adl_100
+        --parse-only results_docker_100 results_nitrobox_100
 
 Results (100 tasks, Claude Sonnet 4.5, Computer Use agent, 100 steps):
 
@@ -111,70 +109,26 @@ def _create_task_subset(osworld_dir: str, n_tasks: int) -> str:
     return str(out_path)
 
 
-def _install_provider(osworld_dir: str) -> None:
-    """Install the adl provider into OSWorld's provider directory."""
-    provider_src = Path(__file__).parent / "osworld_adl_provider"
-    provider_dst = Path(osworld_dir) / "desktop_env" / "providers" / "adl"
-
-    if not provider_src.exists():
-        # Create from inline template
-        provider_dst.mkdir(parents=True, exist_ok=True)
-        _write_provider_files(provider_dst)
-    else:
-        if provider_dst.exists():
-            shutil.rmtree(provider_dst)
-        shutil.copytree(str(provider_src), str(provider_dst))
-
-    # Patch __init__.py to register adl
-    init_file = Path(osworld_dir) / "desktop_env" / "providers" / "__init__.py"
-    init_text = init_file.read_text()
-    if '"adl"' not in init_text:
-        patch = '''    elif provider_name == "adl":
-        from desktop_env.providers.adl.manager import AdlVMManager
-        from desktop_env.providers.adl.provider import AdlProvider
-        return AdlVMManager(), AdlProvider(region)
-'''
-        init_text = init_text.replace(
-            '    else:\n        raise NotImplementedError',
-            patch + '    else:\n        raise NotImplementedError',
-        )
-        init_file.write_text(init_text)
-
-    # Patch desktop_env.py to accept adl
-    env_file = Path(osworld_dir) / "desktop_env" / "desktop_env.py"
-    env_text = env_file.read_text()
-    if '"adl"' not in env_text:
-        env_text = env_text.replace(
-            '{"vmware", "virtualbox"}',
-            '{"vmware", "virtualbox", "adl"}',
-        )
-        env_file.write_text(env_text)
-
-    # Patch run_multienv.py choices
-    runner = Path(osworld_dir) / "scripts" / "python" / "run_multienv.py"
-    if runner.exists():
-        runner_text = runner.read_text()
-        if '"adl"' not in runner_text:
-            runner_text = runner_text.replace(
-                '"docker", "azure"',
-                '"docker", "azure", "adl"',
-            )
-            runner.write_text(runner_text)
-
-    print(f"  nitrobox provider installed at {provider_dst}")
+def _ensure_nitrobox_provider(osworld_dir: str) -> None:
+    """Write nitrobox provider module if it doesn't exist yet."""
+    dst = Path(osworld_dir) / "desktop_env" / "providers" / "nitrobox"
+    if dst.exists():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    _write_provider_files(dst)
 
 
 def _write_provider_files(dst: Path) -> None:
-    """Write the adl provider files (inline, no external dependency)."""
+    """Write the nitrobox provider files (inline, no external dependency)."""
     (dst / "__init__.py").write_text("")
 
     (dst / "manager.py").write_text('''\
-"""VM manager for adl (nitrobox QemuVM) provider."""
+"""VM manager for nitrobox QemuVM provider."""
 import os
 from desktop_env.providers.base import VMManager
 from desktop_env.providers.docker.manager import _download_vm, VMS_DIR, UBUNTU_X86_URL, WINDOWS_X86_URL
 
-class AdlVMManager(VMManager):
+class NitroboxVMManager(VMManager):
     def __init__(self, registry_path=""): pass
     def add_vm(self, vm_path): pass
     def check_and_clean(self): pass
@@ -199,17 +153,17 @@ from filelock import FileLock
 from pathlib import Path
 from desktop_env.providers.base import Provider
 
-logger = logging.getLogger("desktopenv.providers.adl.AdlProvider")
-SNAPSHOT_TAG = "adl_ready"
+logger = logging.getLogger("desktopenv.providers.nitrobox.NitroboxProvider")
+SNAPSHOT_TAG = "nitrobox_ready"
 
-class AdlProvider(Provider):
+class NitroboxProvider(Provider):
     def __init__(self, region=None):
         super().__init__(region)
         self.qemu_proc = None
         self.qmp_sock = None
         self.server_port = self.vnc_port = self.chromium_port = self.vlc_port = None
         self._has_snapshot = False
-        self.lock_file = Path("/tmp/adl_port_allocation.lck")
+        self.lock_file = Path("/tmp/nitrobox_port_allocation.lck")
 
     def _get_available_port(self, start):
         import psutil
@@ -272,7 +226,7 @@ class AdlProvider(Provider):
             pid_off = os.getpid() % 1000
             self.server_port, self.chromium_port = 15000+pid_off, 19222+pid_off
             self.vnc_port, self.vlc_port = 18006+pid_off, 18080+pid_off
-        self.qmp_sock = f"/tmp/adl_osworld_qmp_{self.server_port}.sock"
+        self.qmp_sock = f"/tmp/nitrobox_osworld_qmp_{self.server_port}.sock"
         try: os.unlink(self.qmp_sock)
         except FileNotFoundError: pass
         hostfwd = (f"hostfwd=tcp::{self.server_port}-:5000,"
@@ -329,20 +283,77 @@ class AdlProvider(Provider):
 ''')
 
 
+_RUNNER_WRAPPER = '''\
+"""Wrapper: monkey-patches OSWorld to accept 'nitrobox' provider, then runs the Claude runner."""
+import sys, os, argparse
+sys.path.insert(0, os.getcwd())
+
+# 1. Patch argparse so --provider_name accepts "nitrobox"
+_orig_add_arg = argparse.ArgumentParser.add_argument
+def _patched_add_arg(self, *a, **kw):
+    if a and a[0] == "--provider_name" and "choices" in kw:
+        choices = list(kw["choices"])
+        if "nitrobox" not in choices:
+            choices.append("nitrobox")
+        kw["choices"] = choices
+    return _orig_add_arg(self, *a, **kw)
+argparse.ArgumentParser.add_argument = _patched_add_arg
+
+# 2. Patch provider registry to return nitrobox provider
+import desktop_env.providers as _prov
+_orig_get = _prov.get_provider
+def _patched_get(provider_name, region="us-east-1"):
+    if provider_name == "nitrobox":
+        from desktop_env.providers.nitrobox.manager import NitroboxVMManager
+        from desktop_env.providers.nitrobox.provider import NitroboxProvider
+        return NitroboxVMManager(), NitroboxProvider(region)
+    return _orig_get(provider_name, region)
+_prov.get_provider = _patched_get
+
+# 3. Patch DesktopEnv to accept nitrobox (treat like vmware for validation)
+import desktop_env.desktop_env as _de
+_orig_init = _de.DesktopEnv.__init__
+def _patched_init(self, *a, **kw):
+    if kw.get("provider_name") == "nitrobox":
+        kw = dict(kw, provider_name="vmware")
+        _orig_init(self, *a, **kw)
+        self.provider_name = "nitrobox"
+    else:
+        _orig_init(self, *a, **kw)
+_de.DesktopEnv.__init__ = _patched_init
+
+# Run the Claude runner
+import runpy
+runpy.run_path("scripts/python/run_multienv_claude.py", run_name="__main__")
+'''
+
+
 def run_osworld(
     osworld_dir: str, provider: str, task_file: str,
     result_dir: str, model: str, max_steps: int, num_envs: int,
 ) -> dict:
     """Run OSWorld evaluation and return timing + results."""
+    # For nitrobox provider, use a wrapper that monkey-patches the registration.
+    # For docker/aws, call the runner directly.
+    if provider == "nitrobox":
+        _ensure_nitrobox_provider(osworld_dir)
+        wrapper = Path(osworld_dir) / ".nitrobox_runner.py"
+        wrapper.write_text(_RUNNER_WRAPPER)
+        script = str(wrapper)
+    else:
+        script = "scripts/python/run_multienv_claude.py"
+
     cmd = [
-        sys.executable, "-B", "-u",
-        "scripts/python/run_multienv.py",
+        sys.executable, "-B", "-u", script,
         "--provider_name", provider,
+        "--api_provider", "anthropic",
         "--headless",
         "--observation_type", "screenshot",
         "--model", model,
+        "--sleep_after_execution", "3",
         "--max_steps", str(max_steps),
         "--num_envs", str(num_envs),
+        "--client_password", "password",
         "--test_all_meta_path", task_file,
         "--result_dir", result_dir,
     ]
@@ -486,12 +497,10 @@ def main():
     parser.add_argument("--osworld-dir", required=True)
     parser.add_argument("--n-tasks", type=int, default=100)
     parser.add_argument("--max-steps", type=int, default=15)
-    parser.add_argument("--model", default="claude-sonnet-4-20250514")
+    parser.add_argument("--model", default="claude-sonnet-4-6")
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--envs", default="docker,nitrobox")
     parser.add_argument("--output", default=None)
-    parser.add_argument("--install-provider", action="store_true",
-                        help="Install nitrobox provider into OSWorld and exit")
     parser.add_argument("--parse-only", nargs=2, metavar=("DOCKER_DIR", "NITROBOX_DIR"),
                         help="Parse existing result dirs (skip running)")
     args = parser.parse_args()
@@ -499,10 +508,6 @@ def main():
     osworld_dir = _find_osworld_dir(args.osworld_dir)
     if not osworld_dir:
         print("ERROR: OSWorld directory not found")
-        return
-
-    if args.install_provider:
-        _install_provider(osworld_dir)
         return
 
     envs = [e.strip() for e in args.envs.split(",")]
@@ -515,18 +520,12 @@ def main():
     print(f"  Envs:        {envs}")
 
     # Map env names to OSWorld provider names
-    _env_to_provider = {"docker": "docker", "nitrobox": "adl"}
+    _env_to_provider = {"docker": "docker", "nitrobox": "nitrobox"}
 
     if args.parse_only:
         docker = _parse_results(Path(osworld_dir) / args.parse_only[0], 0)
         nitrobox = _parse_results(Path(osworld_dir) / args.parse_only[1], 0)
     else:
-        # Ensure nitrobox provider is installed
-        provider_dir = Path(osworld_dir) / "desktop_env" / "providers" / "adl"
-        if "nitrobox" in envs and not provider_dir.exists():
-            print("\nInstalling nitrobox provider...")
-            _install_provider(osworld_dir)
-
         task_file = _create_task_subset(osworld_dir, args.n_tasks)
         print(f"  Task file:   {task_file}")
 

@@ -1,20 +1,38 @@
 # OSWorld — Docker vs nitrobox
 
 **Dataset:** OSWorld (GUI agent benchmark, Ubuntu Desktop VM)
-**Agent:** Claude Sonnet 4.5, Computer Use agent, 100 steps
-**Tasks:** 100
-**Date:** 2026-04-08 (results from PR #18)
+**Agent:** Claude Sonnet 4.6, Computer Use agent
+**Tasks:** 10 (1 per domain)
+**Max steps:** 30
+**Concurrency:** 10
+**Date:** 2026-04-09
 
 ## E2E Results
 
-| Env | Tasks | Pass | Rate | Avg Score |
+| Env | Tasks | Pass | Rate | Wall time |
 |-----|-------|------|------|-----------|
-| Docker | 96 | 79 | 82.3% | 0.814 |
-| nitrobox | 94 | 79 | 84.0% | 0.830 |
+| Docker | 10 | 9 | 90.0% | 429s |
+| nitrobox | 10 | 9 | 90.0% | 441s |
 
-Pass rates match within noise. **Seamless drop-in replacement confirmed.**
+**Per-task results identical.** Both fail only on `os` (snap install
+blocked by sudo password issue in VM). Correctness parity confirmed.
 
-### Phase breakdown (per task)
+### Per-domain breakdown
+
+| Domain | Docker | nitrobox |
+|--------|--------|----------|
+| chrome | 1/1 | 1/1 |
+| gimp | 1/1 | 1/1 |
+| libreoffice_calc | 1/1 | 1/1 |
+| libreoffice_impress | 1/1 | 1/1 |
+| libreoffice_writer | 1/1 | 1/1 |
+| multi_apps | 1/1 | 1/1 |
+| os | 0/1 | 0/1 |
+| thunderbird | 1/1 | 1/1 |
+| vlc | 1/1 | 1/1 |
+| vs_code | 1/1 | 1/1 |
+
+## Prior Results (100 tasks, from PR #18)
 
 | Phase | Docker | nitrobox | Speedup |
 |-------|--------|----------|---------|
@@ -22,18 +40,8 @@ Pass rates match within noise. **Seamless drop-in replacement confirmed.**
 | agent_execution | 174.2s | 157.6s | 1.1x |
 | verifier | 22.5s | 22.5s | 1.0x |
 | **total per task** | **230.0s** | **187.1s** | **1.2x** |
-| **overhead %** | **14.5%** | **3.7%** | |
 
-The 4.7x setup speedup comes from QMP loadvm (in-place memory restore)
-vs Docker container restart (OS reboot). The 1.1x agent speedup comes
-from fewer network hops (no Docker bridge layer).
-
-## Concurrent VM Reset Benchmark
-
-Same qcow2, QEMU/KVM. Reset-to-ready = time from triggering reset to
-VM being usable.
-
-### Reset-to-ready
+### Concurrent VM Reset (from PR #18)
 
 | Concurrency | Docker | nitrobox | Speedup |
 |-------------|--------|----------|---------|
@@ -41,42 +49,20 @@ VM being usable.
 | 8 | 18.5s | 2.3s | 8.0x |
 | 16 | 22.0s | 2.6s | **8.5x** |
 
-### Screenshot (HTTP, same Flask endpoint)
-
-| Concurrency | Docker | nitrobox | Speedup |
-|-------------|--------|----------|---------|
-| 4 | 442ms | 377ms | 1.2x |
-| 8 | 448ms | 396ms | 1.1x |
-| 16 | 466ms | 404ms | 1.2x |
-
-## Verification Run (10 tasks, 15 steps)
-
-Independent verification on this machine (2026-04-09):
-
-| Env | Tasks | Pass | Wall time |
-|-----|-------|------|-----------|
-| Docker | 10 | 0 | 1900s (32m) |
-| nitrobox | 10 | 0 | 1703s (28m) |
-
-**Wall-clock speedup: 1.12x.** Both environments produce identical
-results (0 pass expected — 15 steps is insufficient for OSWorld tasks).
-Correctness parity confirmed.
-
 ## Reproduce
 
-```bash
-# 1. Install nitrobox provider into OSWorld
-python examples/bench_osworld_e2e.py \
-    --install-provider \
-    --osworld-dir /path/to/osworld
+Requires OSWorld's `--api_provider` PR
+([xlang-ai/OSWorld#485](https://github.com/xlang-ai/OSWorld/pull/485)).
 
-# 2. Run e2e comparison
+```bash
+# Run e2e comparison (Claude Sonnet 4.6, 10 tasks)
 ANTHROPIC_API_KEY=sk-ant-... python examples/bench_osworld_e2e.py \
     --osworld-dir /path/to/osworld \
-    --n-tasks 100 --max-steps 100 \
-    --envs docker,nitrobox
+    --n-tasks 10 --max-steps 30 \
+    --envs docker,nitrobox \
+    --concurrency 10
 
-# 3. Concurrent VM reset benchmark
+# Concurrent VM reset benchmark
 python examples/bench_osworld_concurrent.py \
     --qcow2 /path/to/Ubuntu.qcow2 \
     --concurrency 1,4,8,16
