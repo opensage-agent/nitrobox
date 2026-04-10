@@ -49,6 +49,7 @@
 ## Reproduce
 
 ```bash
+git clone https://github.com/rucnyz/harbor.git
 docker login   # needed for prebuilt images
 
 # Cold start (first run populates caches)
