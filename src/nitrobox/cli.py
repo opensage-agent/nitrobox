@@ -20,6 +20,15 @@ import time
 from pathlib import Path
 
 
+def _sha256(path: Path) -> str | None:
+    import hashlib
+    try:
+        with open(path, "rb") as f:
+            return hashlib.file_digest(f, "sha256").hexdigest()
+    except OSError:
+        return None
+
+
 def _env_base_dir(args: argparse.Namespace) -> Path:
     if hasattr(args, "dir") and args.dir:
         return Path(args.dir)
@@ -348,65 +357,73 @@ def cmd_setup(args: argparse.Namespace) -> None:
     # ---- checkpoint helper (setuid) ----------------------------------------
     helper_bin = vendor_dir / "nitrobox-checkpoint-helper"
     system_helper = Path("/usr/local/bin/nitrobox-checkpoint-helper")
-    if system_helper.exists() and os.access(str(system_helper), os.X_OK):
-        # Check setuid bit
-        mode = system_helper.stat().st_mode
-        if mode & 0o4000:
-            print("OK: checkpoint helper installed (setuid)")
-        else:
-            print("WARN: checkpoint helper exists but lacks setuid bit")
-    elif helper_bin.exists():
-        print("Installing checkpoint helper (setuid) via Docker...")
-        result = subprocess.run(
-            [
-                docker, "run", "--rm",
-                "-v", f"{helper_bin}:/tmp/helper:ro",
-                "-v", "/usr/local/bin:/host-bin",
-                "alpine", "sh", "-c",
-                "cp /tmp/helper /host-bin/nitrobox-checkpoint-helper && "
-                "chown root:root /host-bin/nitrobox-checkpoint-helper && "
-                "chmod u+s /host-bin/nitrobox-checkpoint-helper",
-            ],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
-            print("OK: checkpoint helper installed (setuid)")
-        else:
-            print(
-                f"ERROR: checkpoint helper install failed:\n  {result.stderr.strip()}\n"
-                f"  Manual fix: sudo cp {helper_bin} /usr/local/bin/ && "
-                f"sudo chmod u+s /usr/local/bin/nitrobox-checkpoint-helper"
-            )
-            ok = False
-    else:
+    if not helper_bin.exists():
         print("WARN: checkpoint helper binary not found in vendor dir")
+    else:
+        vendor_hash = _sha256(helper_bin)
+        system_hash = _sha256(system_helper) if system_helper.exists() else None
+        has_setuid = system_helper.exists() and bool(system_helper.stat().st_mode & 0o4000)
+        if system_hash == vendor_hash and has_setuid:
+            print("OK: checkpoint helper installed (setuid)")
+        else:
+            if system_hash is None:
+                action = "Installing"
+            elif system_hash != vendor_hash:
+                action = "Updating"
+            else:
+                action = "Re-installing"  # exists but missing setuid
+            print(f"{action} checkpoint helper (setuid) via Docker...")
+            result = subprocess.run(
+                [
+                    docker, "run", "--rm",
+                    "-v", f"{helper_bin}:/tmp/helper:ro",
+                    "-v", "/usr/local/bin:/host-bin",
+                    "alpine", "sh", "-c",
+                    "cp /tmp/helper /host-bin/nitrobox-checkpoint-helper && "
+                    "chown root:root /host-bin/nitrobox-checkpoint-helper && "
+                    "chmod u+s /host-bin/nitrobox-checkpoint-helper",
+                ],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                print("OK: checkpoint helper installed (setuid)")
+            else:
+                print(
+                    f"ERROR: checkpoint helper install failed:\n  {result.stderr.strip()}\n"
+                    f"  Manual fix: sudo cp {helper_bin} /usr/local/bin/ && "
+                    f"sudo chmod u+s /usr/local/bin/nitrobox-checkpoint-helper"
+                )
+                ok = False
 
     # ---- CRIU binary (install next to helper) --------------------------------
     criu_bin = vendor_dir / "criu"
     criu_libs = vendor_dir / "criu-libs"
     system_criu = Path("/usr/local/bin/criu")
-    if system_criu.exists():
-        print("OK: CRIU binary installed")
-    elif criu_bin.exists():
-        print("Installing CRIU binary via Docker...")
-        # Copy CRIU + libs next to the helper
-        bind_args = ["-v", f"{criu_bin}:/tmp/criu:ro"]
-        copy_cmd = "cp /tmp/criu /host-bin/criu && chmod +x /host-bin/criu"
-        if criu_libs.is_dir():
-            bind_args.extend(["-v", f"{criu_libs}:/tmp/criu-libs:ro"])
-            copy_cmd += " && cp -r /tmp/criu-libs /host-bin/"
-        result = subprocess.run(
-            [docker, "run", "--rm",
-             "-v", "/usr/local/bin:/host-bin"] + bind_args +
-            ["alpine", "sh", "-c", copy_cmd],
-            capture_output=True, text=True,
-        )
-        if result.returncode == 0:
+    if not criu_bin.exists():
+        print("WARN: CRIU binary not found (checkpoint/restore unavailable)")
+    else:
+        vendor_hash = _sha256(criu_bin)
+        system_hash = _sha256(system_criu) if system_criu.exists() else None
+        if system_hash == vendor_hash:
             print("OK: CRIU binary installed")
         else:
-            print(f"WARN: CRIU install failed: {result.stderr.strip()[:200]}")
-    else:
-        print("WARN: CRIU binary not found (checkpoint/restore unavailable)")
+            action = "Updating" if system_hash else "Installing"
+            print(f"{action} CRIU binary via Docker...")
+            bind_args = ["-v", f"{criu_bin}:/tmp/criu:ro"]
+            copy_cmd = "cp /tmp/criu /host-bin/criu && chmod +x /host-bin/criu"
+            if criu_libs.is_dir():
+                bind_args.extend(["-v", f"{criu_libs}:/tmp/criu-libs:ro"])
+                copy_cmd += " && cp -r /tmp/criu-libs /host-bin/"
+            result = subprocess.run(
+                [docker, "run", "--rm",
+                 "-v", "/usr/local/bin:/host-bin"] + bind_args +
+                ["alpine", "sh", "-c", copy_cmd],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                print("OK: CRIU binary installed")
+            else:
+                print(f"WARN: CRIU install failed: {result.stderr.strip()[:200]}")
 
     # ---- checks (detect only, no action) ---------------------------------
     has_newuidmap = shutil.which("newuidmap") is not None
