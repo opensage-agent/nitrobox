@@ -40,8 +40,14 @@ def _requires_criu():
         pytest.skip("CRIU not available")
 
 
+def _requires_root():
+    if os.geteuid() != 0:
+        pytest.skip("checkpoint requires root")
+
+
 @pytest.fixture
 def sandbox(tmp_path, shared_cache_dir):
+    _requires_root()
     _requires_helper()
     _requires_gobin()
     _requires_criu()
