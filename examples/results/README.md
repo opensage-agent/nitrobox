@@ -72,18 +72,16 @@ ANTHROPIC_API_KEY=sk-ant-... python examples/bench_harbor_e2e.py \
 ## Prerequisites
 
 ```bash
+git clone https://github.com/rucnyz/harbor
 cd harbor && uv sync --all-extras --dev
-pip install nitrobox
-docker login   # required to avoid Docker Hub rate limits
+docker login   # optional to avoid Docker Hub rate limits
 ```
 
 ## Clean State
 
 ```bash
 # Nitrobox caches (may need docker for root-owned dirs)
-docker run --rm -v /tmp:/tmp alpine rm -rf /tmp/nitrobox_$(id -u)
-rm -rf ~/.cache/nitrobox/rootfs/
-
+nitrobox cleanup
 # Harbor caches
 rm -rf ~/.cache/harbor/tasks/
 rm -rf /path/to/harbor/jobs/bench_*

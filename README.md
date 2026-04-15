@@ -100,6 +100,9 @@ echo 'kernel.apparmor_restrict_unprivileged_userns=0' | sudo tee /etc/sysctl.d/9
 
 ```bash
 pip install nitrobox
+
+# optional, for full checkpoint capability, require sudo or docker group 
+nitrobox setup
 ```
 
 ### Development build
@@ -107,9 +110,10 @@ pip install nitrobox
 Requires [Rust](https://rustup.rs/), [Go 1.25+](https://go.dev/), and [maturin](https://www.maturin.rs/):
 
 ```bash
-pip install maturin
-make dev    # builds Rust _core + Go nitrobox-core in one step
-make test   # run tests
+uv sync
+
+# optional
+nitrobox setup
 ```
 
 ## Quick start
