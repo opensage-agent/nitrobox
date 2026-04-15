@@ -114,19 +114,33 @@ func (s *Server) Start() (string, error) {
 	workerRoot := filepath.Join(s.rootDir, "runc-"+snName)
 	os.MkdirAll(workerRoot, 0o700)
 
+	logFile, _ := os.OpenFile(filepath.Join(s.rootDir, "init.log"), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	log := func(msg string, args ...any) {
+		line := fmt.Sprintf("buildkit-init: "+msg+"\n", args...)
+		fmt.Fprint(os.Stderr, line)
+		if logFile != nil {
+			logFile.WriteString(line)
+		}
+	}
+	defer func() { if logFile != nil { logFile.Close() } }()
+
 	// Network
+	log("setting up network providers...")
 	np, npResolvedMode, err := netproviders.Providers(netproviders.Opt{Mode: "host"})
 	if err != nil {
 		cancel()
 		return "", fmt.Errorf("network: %w", err)
 	}
+	log("network OK (mode=%s)", npResolvedMode)
 
 	// Executor
+	log("creating resource monitor...")
 	rm, err := resources.NewMonitor()
 	if err != nil {
 		cancel()
 		return "", fmt.Errorf("resource monitor: %w", err)
 	}
+	log("creating runc executor (rootless, no-sandbox)...")
 	exe, err := runcexecutor.New(runcexecutor.Opt{
 		Root:        filepath.Join(workerRoot, "executor"),
 		Rootless:    true,
@@ -136,22 +150,29 @@ func (s *Server) Start() (string, error) {
 		cancel()
 		return "", fmt.Errorf("executor: %w", err)
 	}
+	log("executor OK")
 
 	// Snapshotter
+	log("creating overlay snapshotter...")
 	rawSnap, err := overlay.NewSnapshotter(filepath.Join(workerRoot, "snapshots"), overlay.AsynchronousRemove)
 	if err != nil {
 		cancel()
 		return "", fmt.Errorf("snapshotter: %w", err)
 	}
+	log("snapshotter OK")
 
 	// Content store
+	log("creating content store...")
 	localstore, err := local.NewStore(filepath.Join(workerRoot, "content"))
 	if err != nil {
 		cancel()
 		return "", fmt.Errorf("content store: %w", err)
 	}
 
-	// Containerd metadata DB — the key piece we need access to
+	log("content store OK")
+
+	// Containerd metadata DB
+	log("opening containerd metadata DB...")
 	metaDBPath := filepath.Join(workerRoot, "containerdmeta.db")
 	bdb, err := bolt.Open(metaDBPath, 0644, nil)
 	if err != nil {
@@ -166,6 +187,7 @@ func (s *Server) Start() (string, error) {
 		return "", fmt.Errorf("init metadata db: %w", err)
 	}
 	s.metaDB = mdb
+	log("metadata DB OK")
 
 	// BuildKit-namespaced wrappers
 	contentStore := containerdsnapshot.NewContentStore(mdb.ContentStore(), "buildkit")
@@ -223,12 +245,14 @@ func (s *Server) Start() (string, error) {
 
 	// --- End inline NewWorkerOpt ---
 
+	log("creating worker...")
 	w, err := base.NewWorker(ctx, opt)
 	if err != nil {
 		cancel()
 		return "", fmt.Errorf("new worker: %w", err)
 	}
 	s.cacheManager = w.CacheManager()
+	log("worker OK")
 	s.metadataStore = md
 
 	wc := &worker.Controller{}
@@ -253,6 +277,7 @@ func (s *Server) Start() (string, error) {
 		return "", fmt.Errorf("history db: %w", err)
 	}
 
+	log("creating controller...")
 	ctrl, err := control.NewController(control.Opt{
 		SessionManager:   sessionManager,
 		WorkerController: wc,
@@ -271,6 +296,9 @@ func (s *Server) Start() (string, error) {
 	}
 	s.controller = ctrl
 
+	log("controller OK")
+
+	log("starting gRPC server...")
 	s.grpcServer = grpc.NewServer()
 	ctrl.Register(s.grpcServer)
 
