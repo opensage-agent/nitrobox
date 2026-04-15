@@ -10,7 +10,9 @@ import pytest
 
 
 def _requires_buildkitd():
-    """Skip if buildkitd is not available."""
+    """Skip if buildkitd is not available or running as root."""
+    if os.geteuid() == 0:
+        pytest.skip("buildkitd is rootless-only, skip under root")
     from nitrobox.image.buildkit import BuildKitManager
     bk = BuildKitManager.get()
     if not bk.available:

@@ -2621,7 +2621,9 @@ class TestBuildKitBuild:
 
     @pytest.fixture(autouse=True)
     def _skip_if_missing(self):
-        """Skip if buildkitd not available."""
+        """Skip if buildkitd not available or running as root."""
+        if os.geteuid() == 0:
+            pytest.skip("buildkitd is rootless-only")
         from nitrobox.image.buildkit import BuildKitManager
         bk = BuildKitManager.get()
         if not bk.available:
