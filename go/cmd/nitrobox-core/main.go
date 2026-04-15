@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"go.podman.io/storage/pkg/reexec"
@@ -151,8 +152,61 @@ func main() {
 	// -- BuildKit commands ------------------------------------------------
 
 	rootCmd.AddCommand(&cobra.Command{
+		Use:   "buildkit-serve",
+		Short: "Run embedded buildkitd in-process (blocks until killed)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var req struct {
+				RootDir string `json:"root_dir"`
+			}
+			// Read config from env (survives userns re-exec) or stdin
+			if configEnv := os.Getenv("_NITROBOX_BUILDKIT_CONFIG"); configEnv != "" {
+				json.Unmarshal([]byte(configEnv), &req)
+			} else {
+				if err := readJSON(&req); err != nil {
+					return err
+				}
+				reqJSON, _ := json.Marshal(req)
+				os.Setenv("_NITROBOX_BUILDKIT_CONFIG", string(reqJSON))
+			}
+
+			// Re-exec in user namespace (rootless buildkitd needs mapped root)
+			unshare.MaybeReexecUsingUserNamespace(false)
+			os.Unsetenv("_NITROBOX_BUILDKIT_CONFIG")
+
+			rootDir := req.RootDir
+			if rootDir == "" {
+				rootDir = nbxbuildkit.DefaultRootDir()
+			}
+
+			srv := nbxbuildkit.NewServer(rootDir)
+			socketPath, err := srv.Start()
+			if err != nil {
+				return err
+			}
+
+			// Write socket info to a well-known file (stdout is polluted
+			// by userns re-exec and BuildKit logs)
+			infoPath := filepath.Join(rootDir, "server.json")
+			infoJSON, _ := json.Marshal(map[string]string{
+				"socket_path": socketPath,
+				"root_dir":    rootDir,
+			})
+			os.WriteFile(infoPath, infoJSON, 0644)
+			fmt.Fprintf(os.Stderr, "buildkit-serve: info written to %s\n", infoPath)
+
+			// Block until signal
+			sigCh := make(chan os.Signal, 1)
+			signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+			<-sigCh
+
+			srv.Stop()
+			return nil
+		},
+	})
+
+	rootCmd.AddCommand(&cobra.Command{
 		Use:   "buildkit-start",
-		Short: "Start managed buildkitd daemon",
+		Short: "Start managed buildkitd daemon (external process)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var req struct {
 				BuildkitdBin string `json:"buildkitd_bin"`
