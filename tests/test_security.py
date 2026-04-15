@@ -314,6 +314,24 @@ class TestCleanup:
         assert cleaned >= 1
         assert not env_dir.exists()
 
+    def test_cleanup_stale_removes_orphan_volumes(self, tmp_path):
+        """cleanup_stale() removes *_volumes dirs whose project has no sandbox."""
+        base = tmp_path / "envs"
+        base.mkdir()
+        # Orphan: project has no sibling sandbox dir.
+        (base / "proj-gone_volumes").mkdir()
+        (base / "proj-gone_volumes" / "data").write_text("leaked")
+        # Not orphan: a plain (non-sandbox) sibling dir is enough to
+        # keep the volumes dir around — cleanup_stale only removes
+        # volumes when no corresponding project entry exists.
+        (base / "proj-live_main").mkdir()
+        (base / "proj-live_volumes").mkdir()
+
+        cleaned = Sandbox.cleanup_stale(str(base))
+        assert cleaned >= 1
+        assert not (base / "proj-gone_volumes").exists()
+        assert (base / "proj-live_volumes").exists()
+
 
 # ------------------------------------------------------------------ #
 #  User namespace tests (non-root)                                     #
@@ -710,6 +728,32 @@ class TestSharedNetwork:
         finally:
             net_b.destroy()
             net_a.destroy()
+
+    def test_destroy_kills_pasta_daemon(self, tmp_path):
+        """SharedNetwork.destroy() kills the pasta daemon (not just sentinel)."""
+        self._skip_if_not_rootless()
+        from nitrobox.compose import SharedNetwork
+
+        net = SharedNetwork("pasta-kill-test")
+        try:
+            if not net.has_pasta:
+                pytest.skip("pasta not available / did not start")
+            pid_file = net._pasta_pid_file
+            assert pid_file is not None and pid_file.exists()
+            pasta_pid = int(pid_file.read_text().strip())
+            # Pasta is alive before destroy
+            assert Path(f"/proc/{pasta_pid}").exists()
+        finally:
+            net.destroy()
+
+        # Pasta should be dead and pidfile cleaned up
+        import time
+        for _ in range(50):
+            if not Path(f"/proc/{pasta_pid}").exists():
+                break
+            time.sleep(0.05)
+        assert not Path(f"/proc/{pasta_pid}").exists(), \
+            f"pasta pid {pasta_pid} still alive after destroy()"
 
     def test_shared_network_sandbox_runs_commands(self, tmp_path, shared_cache_dir):
         """Sandbox with shared userns can run commands normally."""

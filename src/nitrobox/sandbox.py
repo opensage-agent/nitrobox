@@ -917,6 +917,21 @@ class Sandbox:
             _force_rmtree(entry)
             cleaned += 1
 
+        # Remove orphan compose *_volumes dirs whose project has no
+        # surviving sandbox dirs.  These leak when a compose project
+        # crashes before reaching ComposeProject.down(volumes=True).
+        remaining = {e.name for e in base.iterdir() if e.is_dir()}
+        suffix = "_volumes"
+        for name in list(remaining):
+            if not name.endswith(suffix):
+                continue
+            prefix = name[:-len(suffix)] + "_"
+            if any(other.startswith(prefix) for other in remaining if other != name):
+                continue
+            logger.info("Cleaning up orphan compose volumes dir %s", name)
+            _force_rmtree(base / name)
+            cleaned += 1
+
         if cleaned:
             logger.info("Cleaned up %d stale sandbox(es) under %s", cleaned, env_base_dir)
         return cleaned

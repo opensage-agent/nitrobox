@@ -57,6 +57,7 @@ class SharedNetwork:
         self.has_pasta: bool = False
         self.dns_forward_ips: list[str] = []
         self.guest_ip: str | None = None
+        self._pasta_pid_file: Path | None = None
         # Detect subuid range (reuse rootless sandbox logic)
         self._subuid_range = detect_subuid_range()
 
@@ -150,6 +151,13 @@ class SharedNetwork:
 
         pid = self._sentinel.pid
 
+        # Write PID file so destroy() can kill the daemon.  Pasta
+        # double-forks into its own session; the sentinel's process
+        # group does not catch it.
+        base = Path(f"/tmp/nitrobox_{os.getuid()}")
+        base.mkdir(parents=True, exist_ok=True)
+        self._pasta_pid_file = base / f".shared_net_{self.name}_{pid}.pasta.pid"
+
         cmd: list[str] = [
             pasta_bin, "--config-net",
             "--ipv4-only",
@@ -166,6 +174,7 @@ class SharedNetwork:
             "--dns-forward", "169.254.1.1",
             "--no-map-gw", "--quiet",
             "--map-guest-addr", "169.254.1.2",
+            "-P", str(self._pasta_pid_file),
             str(pid),
         ])
 
@@ -249,13 +258,32 @@ class SharedNetwork:
         return self._sentinel.poll() is None
 
     def destroy(self) -> None:
-        """Kill the sentinel, releasing the shared namespaces."""
+        """Kill the sentinel and pasta, releasing the shared namespaces."""
         try:
             SharedNetwork._live_instances.remove(self)
         except ValueError:
             pass
+        import signal as _signal
+        # Kill pasta explicitly: it double-forks into its own session
+        # so killpg(sentinel.pid) does not reach it.
+        if self._pasta_pid_file and self._pasta_pid_file.exists():
+            try:
+                pasta_pid = int(self._pasta_pid_file.read_text().strip())
+                try:
+                    os.killpg(os.getpgid(pasta_pid), _signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    try:
+                        os.kill(pasta_pid, _signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+            except (ValueError, OSError):
+                pass
+            try:
+                self._pasta_pid_file.unlink()
+            except OSError:
+                pass
+            self._pasta_pid_file = None
         if self._sentinel.poll() is None:
-            import signal as _signal
             try:
                 os.killpg(self._sentinel.pid, _signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
