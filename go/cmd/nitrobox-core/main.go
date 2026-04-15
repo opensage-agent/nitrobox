@@ -66,48 +66,6 @@ func main() {
 	})
 
 	rootCmd.AddCommand(&cobra.Command{
-		Use:   "image-build",
-		Short: "Build a Dockerfile using buildah",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			var req struct {
-				Dockerfile string `json:"dockerfile"`
-				Context    string `json:"context"`
-				Tag        string `json:"tag"`
-				GraphRoot  string `json:"graph_root"`
-				RunRoot    string `json:"run_root"`
-				Driver     string `json:"driver"`
-			}
-			if configEnv := os.Getenv("_NITROBOX_BUILD_CONFIG"); configEnv != "" {
-				json.Unmarshal([]byte(configEnv), &req)
-			} else {
-				if err := readJSON(&req); err != nil {
-					return err
-				}
-				reqJSON, _ := json.Marshal(req)
-				os.Setenv("_NITROBOX_BUILD_CONFIG", string(reqJSON))
-			}
-			unshare.MaybeReexecUsingUserNamespace(false)
-			os.Unsetenv("_NITROBOX_BUILD_CONFIG")
-
-			if devnull, err := os.Open("/dev/null"); err == nil {
-				syscall.Dup2(int(devnull.Fd()), 0)
-				devnull.Close()
-			}
-
-			store, err := nbximage.OpenStore(storeConfig(req.GraphRoot, req.RunRoot, req.Driver))
-			if err != nil {
-				return err
-			}
-			defer store.Free()
-			imageID, err := nbximage.BuildImage(store, req.Dockerfile, req.Context, req.Tag)
-			if err != nil {
-				return err
-			}
-			return writeJSON(imageID)
-		},
-	})
-
-	rootCmd.AddCommand(&cobra.Command{
 		Use:   "image-delete",
 		Short: "Delete an image from containers/storage (mirrors docker rmi)",
 		RunE: func(cmd *cobra.Command, args []string) error {

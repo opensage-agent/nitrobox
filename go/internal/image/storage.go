@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/containers/buildah/define"
-	"github.com/containers/buildah/imagebuildah"
 	cp "go.podman.io/image/v5/copy"
 	"go.podman.io/image/v5/signature"
 	imgstorage "go.podman.io/image/v5/storage"
@@ -191,62 +189,6 @@ func PullImage(store storage.Store, imageRef string, systemCtx *imagetypes.Syste
 	}
 
 	return nil, fmt.Errorf("pull %q: %w", imageRef, registryErr)
-}
-
-// BuildImage builds a Dockerfile using buildah.
-func BuildImage(store storage.Store, dockerfile, contextDir, tag string) (string, error) {
-	ctx := context.Background()
-
-	// buildah's commit step requires a signature policy file.  PullImage
-	// builds one in-memory (NewPolicyContext), but BuildDockerfiles reads
-	// it from disk.  We don't ship /etc/containers/policy.json, so write
-	// a permissive policy to a temp file and point buildah at it —
-	// mirrors the PullImage policy (accept anything).
-	policyPath, err := writePermissivePolicy()
-	if err != nil {
-		return "", fmt.Errorf("write policy: %w", err)
-	}
-
-	opts := define.BuildOptions{
-		Output:                 tag,
-		ContextDirectory:       contextDir,
-		CommonBuildOpts:        &define.CommonBuildOptions{},
-		Layers:                 true,
-		RemoveIntermediateCtrs: true,
-		SignaturePolicyPath:    policyPath,
-		// IsolationOCIRootless: uses runc for proper rootless container execution.
-		// This is what podman uses for rootless builds.
-		Isolation: define.IsolationOCIRootless,
-		Out:       os.Stdout,
-		Err:       os.Stderr,
-	}
-
-	imageID, _, err := imagebuildah.BuildDockerfiles(ctx, store, opts, dockerfile)
-	if err != nil {
-		return "", fmt.Errorf("build failed: %w", err)
-	}
-
-	return imageID, nil
-}
-
-// writePermissivePolicy writes a minimal signature policy that accepts
-// anything to a temp file, returning the path.  Same semantics as the
-// in-memory policy PullImage constructs via NewPRInsecureAcceptAnything.
-// writePermissivePolicy writes a minimal signature policy that accepts
-// anything to a temp file, returning the path.  Same semantics as the
-// in-memory policy PullImage constructs via NewPRInsecureAcceptAnything.
-func writePermissivePolicy() (string, error) {
-	const body = `{"default":[{"type":"insecureAcceptAnything"}]}`
-	f, err := os.CreateTemp("", "nitrobox-policy-*.json")
-	if err != nil {
-		return "", err
-	}
-	if _, err := f.WriteString(body); err != nil {
-		f.Close()
-		os.Remove(f.Name())
-		return "", err
-	}
-	return f.Name(), f.Close()
 }
 
 // DeleteImage removes an image and its exclusive layers from the store.
