@@ -222,34 +222,11 @@ func BuildImage(store storage.Store, dockerfile, contextDir, tag string) (string
 	}
 
 	imageID, _, err := imagebuildah.BuildDockerfiles(ctx, store, opts, dockerfile)
-	// Whether the build succeeded or failed, buildah tends to leave its
-	// "working container" behind in containers/storage — the final stage
-	// commit produces an image but doesn't delete the builder.  Left
-	// around, it pins the base image's layers, so a later `rmi` fails
-	// with "image is in use by a container".  Nitrobox's runtime containers
-	// don't use containers/storage at all (they're namespace-managed), so
-	// anything in the container table is 100% buildah residue — safe to
-	// sweep.
-	cleanupBuildContainers(store)
 	if err != nil {
 		return "", fmt.Errorf("build failed: %w", err)
 	}
 
 	return imageID, nil
-}
-
-// cleanupBuildContainers deletes every container record in the store.
-// Only called from BuildImage, where the invariant is "nitrobox doesn't
-// own any containers here."  Errors are ignored — this is best-effort
-// post-build hygiene, not a correctness requirement.
-func cleanupBuildContainers(store storage.Store) {
-	containers, err := store.Containers()
-	if err != nil {
-		return
-	}
-	for _, c := range containers {
-		_ = store.DeleteContainer(c.ID)
-	}
 }
 
 // writePermissivePolicy writes a minimal signature policy that accepts
