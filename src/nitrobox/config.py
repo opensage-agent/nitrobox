@@ -698,17 +698,14 @@ def detect_subuid_range() -> tuple[int, int, int] | None:
     import shutil
 
     if shutil.which("newuidmap") is None or shutil.which("newgidmap") is None:
-        logger.warning(
-            "newuidmap/newgidmap not found — falling back to single-UID "
-            "mapping. Programs that switch users (apt-get, su, sudo) may "
-            "fail with 'Operation not permitted'. "
-            "Install the 'uidmap' package for full multi-UID support:\n"
+        raise RuntimeError(
+            "newuidmap/newgidmap not found. nitrobox requires the 'uidmap' "
+            "package for rootless user namespace support.\n"
+            "Install it with:\n"
             "  Ubuntu/Debian: sudo apt-get install -y uidmap\n"
             "  Fedora/RHEL:   sudo dnf install -y shadow-utils\n"
             "  Arch:          sudo pacman -S shadow"
         )
-        _subuid_detected = True
-        return None
 
     import getpass
     try:

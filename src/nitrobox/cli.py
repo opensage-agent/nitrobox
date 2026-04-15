@@ -435,13 +435,14 @@ def cmd_setup(args: argparse.Namespace) -> None:
     except FileNotFoundError:
         pass
 
-    if has_newuidmap and has_subuid:
-        print("OK: subuid/subgid configured (multi-UID mapping)")
-    elif not has_newuidmap:
+    if not has_newuidmap:
         print(
-            "WARN: newuidmap not found — multi-UID mapping unavailable.\n"
+            "FAIL: newuidmap not found — nitrobox requires the 'uidmap' package.\n"
             "  Fix: sudo apt-get install -y uidmap"
         )
+        sys.exit(1)
+    elif has_subuid:
+        print("OK: subuid/subgid configured (multi-UID mapping)")
     elif not has_subuid:
         print(
             f"WARN: no /etc/subuid entry for {user}.\n"
