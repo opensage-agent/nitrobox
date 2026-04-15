@@ -1,38 +1,54 @@
 // Embedded buildkitd server — runs BuildKit's solver in-process.
 //
-// Eliminates the need for a separate buildkitd binary and gives
-// direct access to the snapshotter for layer path discovery.
+// Inlines runc.NewWorkerOpt to get access to the containerd metadata DB
+// for proper Image → Unpack → Snapshotter.Mounts() layer resolution.
 package buildkit
 
 import (
 	"context"
 	"fmt"
+	"maps"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 
+	"github.com/containerd/containerd/v2/core/diff/apply"
+	ctdmetadata "github.com/containerd/containerd/v2/core/metadata"
+	ctdsnapshots "github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/containerd/v2/plugins/content/local"
+	"github.com/containerd/containerd/v2/plugins/diff/walking"
 	"github.com/containerd/containerd/v2/plugins/snapshots/overlay"
+	"github.com/containerd/platforms"
+
+	"github.com/moby/buildkit/cache"
+	"github.com/moby/buildkit/cache/metadata"
 	"github.com/moby/buildkit/control"
 	"github.com/moby/buildkit/executor/oci"
+	"github.com/moby/buildkit/executor/resources"
+	"github.com/moby/buildkit/executor/runcexecutor"
 	"github.com/moby/buildkit/frontend"
 	dockerfile "github.com/moby/buildkit/frontend/dockerfile/builder"
 	"github.com/moby/buildkit/frontend/gateway/forwarder"
 	"github.com/moby/buildkit/session"
 	"github.com/moby/buildkit/snapshot"
+	containerdsnapshot "github.com/moby/buildkit/snapshot/containerd"
 	"github.com/moby/buildkit/solver"
 	"github.com/moby/buildkit/solver/bboltcachestorage"
 	"github.com/moby/buildkit/util/bklog"
 	"github.com/moby/buildkit/util/db/boltutil"
+	"github.com/moby/buildkit/util/leaseutil"
 	"github.com/moby/buildkit/util/network/netproviders"
 	"github.com/moby/buildkit/util/resolver"
+	"github.com/moby/buildkit/util/winlayers"
 	"github.com/moby/buildkit/worker"
 	"github.com/moby/buildkit/worker/base"
-	"github.com/moby/buildkit/worker/runc"
+	wlabel "github.com/moby/buildkit/worker/label"
 
-	ctdsnapshots "github.com/containerd/containerd/v2/core/snapshots"
-
+	ocispecs "github.com/opencontainers/image-spec/specs-go/v1"
+	bolt "go.etcd.io/bbolt"
 	"google.golang.org/grpc"
 )
 
@@ -43,7 +59,10 @@ type Server struct {
 	grpcServer  *grpc.Server
 	listener    net.Listener
 	socketPath  string
-	snapshotter snapshot.Snapshotter // saved from WorkerOpt before NewWorker
+	snapshotter   snapshot.Snapshotter   // BuildKit-wrapped snapshotter
+	metaDB        *ctdmetadata.DB       // containerd metadata DB
+	cacheManager  cache.Manager         // BuildKit cache manager
+	metadataStore *metadata.Store       // BuildKit metadata store (chain ID index)
 
 	mu       sync.Mutex
 	started  bool
@@ -72,8 +91,7 @@ func (s *Server) Start() (string, error) {
 		return "", fmt.Errorf("mkdir root: %w", err)
 	}
 
-	// Socket path — use outer UID (passed via env before userns re-exec)
-	// so the socket is accessible from outside the user namespace.
+	// Socket path — use outer UID so it's accessible from outside userns.
 	outerUID := os.Getenv("_NITROBOX_OUTER_UID")
 	if outerUID == "" {
 		outerUID = fmt.Sprintf("%d", os.Getuid())
@@ -91,34 +109,127 @@ func (s *Server) Start() (string, error) {
 
 	hosts := resolver.NewRegistryConfig(nil)
 
-	// OCI worker (rootless, overlayfs, no process sandbox)
-	snFactory := runc.SnapshotterFactory{
-		Name: "overlayfs",
-		New: func(root string) (ctdsnapshots.Snapshotter, error) {
-			return overlay.NewSnapshotter(root, overlay.AsynchronousRemove)
-		},
-	}
-	opt, err := runc.NewWorkerOpt(
-		s.rootDir, snFactory,
-		true, oci.NoProcessSandbox,
-		nil, nil,
-		netproviders.Opt{Mode: "host"},
-		nil, "", "", false, nil, "", "", nil,
-	)
+	// --- Inline runc.NewWorkerOpt to expose mdb ---
+	snName := "overlayfs"
+	workerRoot := filepath.Join(s.rootDir, "runc-"+snName)
+	os.MkdirAll(workerRoot, 0o700)
+
+	// Network
+	np, npResolvedMode, err := netproviders.Providers(netproviders.Opt{Mode: "host"})
 	if err != nil {
 		cancel()
-		return "", fmt.Errorf("worker opt: %w", err)
+		return "", fmt.Errorf("network: %w", err)
 	}
+
+	// Executor
+	rm, err := resources.NewMonitor()
+	if err != nil {
+		cancel()
+		return "", fmt.Errorf("resource monitor: %w", err)
+	}
+	exe, err := runcexecutor.New(runcexecutor.Opt{
+		Root:        filepath.Join(workerRoot, "executor"),
+		Rootless:    true,
+		ProcessMode: oci.NoProcessSandbox,
+	}, np)
+	if err != nil {
+		cancel()
+		return "", fmt.Errorf("executor: %w", err)
+	}
+
+	// Snapshotter
+	rawSnap, err := overlay.NewSnapshotter(filepath.Join(workerRoot, "snapshots"), overlay.AsynchronousRemove)
+	if err != nil {
+		cancel()
+		return "", fmt.Errorf("snapshotter: %w", err)
+	}
+
+	// Content store
+	localstore, err := local.NewStore(filepath.Join(workerRoot, "content"))
+	if err != nil {
+		cancel()
+		return "", fmt.Errorf("content store: %w", err)
+	}
+
+	// Containerd metadata DB — the key piece we need access to
+	metaDBPath := filepath.Join(workerRoot, "containerdmeta.db")
+	bdb, err := bolt.Open(metaDBPath, 0644, nil)
+	if err != nil {
+		cancel()
+		return "", fmt.Errorf("metadata db: %w", err)
+	}
+	mdb := ctdmetadata.NewDB(bdb, localstore, map[string]ctdsnapshots.Snapshotter{
+		snName: rawSnap,
+	})
+	if err := mdb.Init(ctx); err != nil {
+		cancel()
+		return "", fmt.Errorf("init metadata db: %w", err)
+	}
+	s.metaDB = mdb
+
+	// BuildKit-namespaced wrappers
+	contentStore := containerdsnapshot.NewContentStore(mdb.ContentStore(), "buildkit")
+	lm := leaseutil.WithNamespace(ctdmetadata.NewLeaseManager(mdb), "buildkit")
+	snap := containerdsnapshot.NewSnapshotter(snName, mdb.Snapshotter(snName), "buildkit", nil)
+	s.snapshotter = snap
+
+	// Migrate metadata
+	if err := cache.MigrateV2(
+		ctx,
+		filepath.Join(workerRoot, "metadata.db"),
+		filepath.Join(workerRoot, "metadata_v2.db"),
+		contentStore, snap, lm,
+	); err != nil {
+		cancel()
+		return "", fmt.Errorf("migrate: %w", err)
+	}
+
+	md, err := metadata.NewStore(filepath.Join(workerRoot, "metadata_v2.db"))
+	if err != nil {
+		cancel()
+		return "", fmt.Errorf("metadata store: %w", err)
+	}
+
+	id, _ := base.ID(workerRoot)
+	hostname, _ := os.Hostname()
+
+	opt := base.WorkerOpt{
+		ID:   id,
+		Root: workerRoot,
+		Labels: map[string]string{
+			wlabel.Executor:       "oci",
+			wlabel.Snapshotter:    snName,
+			wlabel.Hostname:       hostname,
+			wlabel.Network:        npResolvedMode,
+			wlabel.OCIProcessMode: oci.NoProcessSandbox.String(),
+			wlabel.SELinuxEnabled: strconv.FormatBool(false),
+		},
+		MetadataStore:    md,
+		NetworkProviders: np,
+		Executor:         exe,
+		Snapshotter:      snap,
+		ContentStore:     contentStore,
+		Applier:          winlayers.NewFileSystemApplierWithWindows(contentStore, apply.NewFileSystemApplier(contentStore)),
+		Differ:           winlayers.NewWalkingDiffWithWindows(contentStore, walking.NewWalkingDiff(contentStore)),
+		ImageStore:       nil,
+		Platforms:        []ocispecs.Platform{platforms.Normalize(platforms.DefaultSpec())},
+		LeaseManager:     lm,
+		GarbageCollect:   mdb.GarbageCollect,
+		ResourceMonitor:  rm,
+		MountPoolRoot:    filepath.Join(workerRoot, "cachemounts"),
+	}
+	maps.Copy(opt.Labels, map[string]string{}) // ensure non-nil
 	opt.RegistryHosts = hosts
 
-	// Save snapshotter before it gets wrapped by NewWorker
-	s.snapshotter = opt.Snapshotter
+	// --- End inline NewWorkerOpt ---
 
 	w, err := base.NewWorker(ctx, opt)
 	if err != nil {
 		cancel()
 		return "", fmt.Errorf("new worker: %w", err)
 	}
+	s.cacheManager = w.CacheManager()
+	s.metadataStore = md
 
 	wc := &worker.Controller{}
 	if err := wc.Add(w); err != nil {
@@ -170,12 +281,8 @@ func (s *Server) Start() (string, error) {
 	}
 
 	go func() {
-		bklog.L.Infof("gRPC server starting on %s", s.socketPath)
 		if err := s.grpcServer.Serve(s.listener); err != nil {
-			bklog.L.Errorf("gRPC serve FAILED: %v", err)
-			fmt.Fprintf(os.Stderr, "GRPC SERVE ERROR: %v\n", err)
-		} else {
-			bklog.L.Infof("gRPC server stopped cleanly")
+			bklog.L.Errorf("gRPC serve error: %v", err)
 		}
 	}()
 
@@ -211,62 +318,85 @@ func (s *Server) SocketPath() string { return s.socketPath }
 func (s *Server) RootDir() string { return s.rootDir }
 
 // GetLayerPaths resolves a manifest digest to overlay layer directory paths.
-// Uses the snapshotter directly (in-process) — no DB lock issues.
+// Uses BuildKit's cache manager to find the snapshot ref by chain ID,
+// then calls ref.Mount() to get the actual overlay mount paths.
+// This is the correct API — no direct snapshotter key guessing needed.
 func (s *Server) GetLayerPaths(ctx context.Context, manifestDigest string) ([]string, error) {
-	if s.snapshotter == nil {
-		return nil, fmt.Errorf("snapshotter not initialized")
+	if s.cacheManager == nil {
+		return nil, fmt.Errorf("cache manager not initialized")
 	}
 
-	// Read manifest → config → diff IDs from content store (plain files)
-	contentDir := filepath.Join(s.rootDir, "runc-overlayfs", "content", "blobs", "sha256")
+	// Read manifest → config → diff IDs from content store
+	workerRoot := filepath.Join(s.rootDir, "runc-overlayfs")
+	contentDir := filepath.Join(workerRoot, "content", "blobs", "sha256")
 	digest := strings.TrimPrefix(manifestDigest, "sha256:")
 
 	manifest, err := readJSON[ociManifest](filepath.Join(contentDir, digest))
 	if err != nil {
 		return nil, fmt.Errorf("read manifest: %w", err)
 	}
-
 	configDigest := trimSHA256(manifest.Config.Digest)
 	config, err := readJSON[ociConfig](filepath.Join(contentDir, configDigest))
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
-
 	chainIDs := computeChainIDs(config.RootFS.DiffIDs)
+	if len(chainIDs) == 0 {
+		return nil, fmt.Errorf("no layers in image")
+	}
 
-	// Query snapshotter for each chain ID → get mount paths
+	// Search BuildKit's metadata store for the cache record matching
+	// the final chain ID, then use the cache manager to get the ref.
+	finalChainID := chainIDs[len(chainIDs)-1]
+
+	// Search index: "chainid:sha256:xxx"
+	sis, err := s.metadataStore.Search(ctx, "chainid:"+finalChainID, false)
+	if err != nil || len(sis) == 0 {
+		return nil, fmt.Errorf("chain %s not found in metadata (search err: %v, results: %d)",
+			finalChainID[:20], err, len(sis))
+	}
+	recordID := sis[0].ID()
+
+	ref, err := s.cacheManager.Get(ctx, recordID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("cache get %s: %w", finalChainID[:20], err)
+	}
+	defer ref.Release(context.TODO())
+
+	// Mount read-only to get overlay mount info
+	mountable, err := ref.Mount(ctx, true, nil)
+	if err != nil {
+		return nil, fmt.Errorf("mount: %w", err)
+	}
+	mountList, release, err := mountable.Mount()
+	if err != nil {
+		return nil, fmt.Errorf("get mounts: %w", err)
+	}
+	defer release()
+
+	// Parse overlay mount options to extract layer paths
 	var paths []string
-	for _, chainID := range chainIDs {
-		mountable, err := s.snapshotter.Mounts(ctx, chainID)
-		if err != nil {
-			bklog.L.Debugf("snapshotter.Mounts(%s) failed: %v", chainID, err)
-			continue
-		}
-		mounts, release, err := mountable.Mount()
-		if err != nil {
-			bklog.L.Debugf("mountable.Mount(%s) failed: %v", chainID, err)
-			continue
-		}
-		defer release()
-
-		// Extract the fs directory from overlay mount options
-		for _, m := range mounts {
-			if m.Type == "bind" {
-				paths = append(paths, m.Source)
-				break
-			}
-			// For overlay: first layer is bind mount, subsequent have lowerdir+upperdir
+	for _, m := range mountList {
+		if m.Type == "bind" {
+			paths = append(paths, m.Source)
+		} else if m.Type == "overlay" {
 			for _, opt := range m.Options {
+				if strings.HasPrefix(opt, "lowerdir=") {
+					dirs := strings.Split(opt[9:], ":")
+					// lowerdir is top-to-bottom; reverse to bottom-to-top
+					for i := len(dirs) - 1; i >= 0; i-- {
+						paths = append(paths, dirs[i])
+					}
+				}
 				if strings.HasPrefix(opt, "upperdir=") {
-					paths = append(paths, opt[len("upperdir="):])
+					paths = append(paths, opt[9:])
 				}
 			}
 		}
 	}
 
-	if len(paths) != len(chainIDs) {
-		return nil, fmt.Errorf("resolved %d/%d layers", len(paths), len(chainIDs))
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("no layer paths from mounts")
 	}
-
 	return paths, nil
 }

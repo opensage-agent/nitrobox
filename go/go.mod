@@ -4,10 +4,13 @@ go 1.25.5
 
 require (
 	github.com/containerd/containerd/v2 v2.2.0
+	github.com/containerd/platforms v1.0.0-rc.2
 	github.com/docker/cli v29.3.1+incompatible
 	github.com/moby/buildkit v0.26.3
+	github.com/opencontainers/image-spec v1.1.1
 	github.com/rootless-containers/rootlesskit/v2 v2.3.6
 	github.com/spf13/cobra v1.10.2
+	go.etcd.io/bbolt v1.4.3
 	go.podman.io/image/v5 v5.39.2
 	go.podman.io/storage v1.62.0
 	golang.org/x/sync v0.19.0
@@ -41,7 +44,6 @@ require (
 	github.com/containerd/go-runc v1.1.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/nydus-snapshotter v0.15.4 // indirect
-	github.com/containerd/platforms v1.0.0-rc.2 // indirect
 	github.com/containerd/stargz-snapshotter/estargz v0.18.2 // indirect
 	github.com/containerd/ttrpc v1.2.8 // indirect
 	github.com/containerd/typeurl/v2 v2.2.3 // indirect
@@ -106,7 +108,6 @@ require (
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/morikuni/aec v1.1.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
-	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/opencontainers/runtime-spec v1.2.1 // indirect
 	github.com/opencontainers/runtime-tools v0.9.1-0.20250523060157-0ea5ed0382a2 // indirect
 	github.com/opencontainers/selinux v1.12.0 // indirect
@@ -142,7 +143,6 @@ require (
 	github.com/vbauerster/mpb/v8 v8.10.2 // indirect
 	github.com/vishvananda/netlink v1.3.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect
-	go.etcd.io/bbolt v1.4.3 // indirect
 	go.opencensus.io v0.24.0 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc v0.63.0 // indirect
