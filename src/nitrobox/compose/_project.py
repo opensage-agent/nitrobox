@@ -13,7 +13,6 @@ Usage::
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -370,56 +369,15 @@ class ComposeProject:
             shutil.rmtree(self._volume_dir, ignore_errors=True)
             self._volume_dir = None
 
-        # Remove images from containers/storage (mirrors docker compose down --rmi)
-        if rmi is not None:
-            self._remove_image_cache(rmi)
+        # Image cleanup: BuildKit manages its own cache via GC.
+        # No explicit image deletion needed (layers are shared and
+        # reference-counted by the cache manager).
 
         # Drop from the atexit registry so interpreter shutdown doesn't
         # try to double-teardown an already-cleaned project.
         self._unregister(self)
 
         logger.info("ComposeProject %s: all services stopped", self._project_name)
-
-    def _remove_image_cache(self, mode: str) -> None:
-        """Remove images from containers/storage used by this project.
-
-        Mirrors ``docker compose down --rmi``:
-
-        - ``"all"``: remove all images (pulled + built).
-        - ``"local"``: remove only locally-built images
-          (those without a ``/`` in the name, i.e. no registry prefix).
-
-        Layers shared with other images are kept (same as ``docker rmi``).
-        """
-        import subprocess
-
-        from nitrobox._gobin import gobin
-        bin_path = gobin()
-
-        for name, image in self._image_map.items():
-            if mode == "local" and "/" in image:
-                continue  # skip registry images in "local" mode
-
-            try:
-                req = json.dumps({
-                    "image": image,
-                    "run_root": f"/tmp/nitrobox-containers-run-{os.getuid()}",
-                })
-                env = dict(os.environ)
-                env["_NITROBOX_DELETE_CONFIG"] = req
-                r = subprocess.run(
-                    [bin_path, "image-delete"],
-                    capture_output=True,
-                    env=env,
-                    timeout=60,
-                )
-                if r.returncode == 0:
-                    logger.debug("Removed image %s from containers/storage", image)
-                else:
-                    logger.warning("Could not remove image %s: rc=%d %s",
-                                   image, r.returncode, r.stderr.decode().strip()[:200])
-            except Exception as e:
-                logger.warning("image cleanup failed for %s: %s", image, e)
 
     def reset(self) -> None:
         """Reset all sandboxes and restart service commands.

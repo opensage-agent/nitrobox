@@ -262,13 +262,7 @@ def get_image_config(image_name: str) -> dict | None:
         _image_store_populate(image_name, result)
         return result
 
-    # 2. containers/storage — primary source for pulled images
-    store_cfg = _read_config_from_containers_storage(image_name)
-    if store_cfg is not None:
-        _image_store_populate(image_name, store_cfg)
-        return store_cfg
-
-    # 3. Disk manifest cache — populated by prepare_rootfs_layers_from_docker
+    # 2. Disk manifest cache — populated by prepare_rootfs_layers_from_docker
     disk_cfg = _read_config_from_manifest_cache(image_name)
     if disk_cfg is not None:
         _image_store_populate(image_name, disk_cfg)
