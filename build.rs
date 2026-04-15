@@ -12,8 +12,9 @@
 //! (because of ``python-source = "src"``), so writing the binary into
 //! ``src/nitrobox/_vendor/nitrobox-core`` is enough to ship it.
 //!
-//! If the Go toolchain isn't available, we emit a warning and skip — the
-//! Python loader will fall back to PATH or ``NITROBOX_CORE_BIN``.
+//! If the Go toolchain isn't available, the build fails with an error.
+//! Set ``NITROBOX_SKIP_GO_BUILD=1`` to skip the Go build — the Python
+//! loader will then fall back to PATH or ``NITROBOX_CORE_BIN``.
 
 use std::env;
 use std::path::PathBuf;
@@ -48,16 +49,15 @@ fn main() {
         return;
     }
 
-    // If `go` isn't on PATH, skip with a useful warning instead of failing the
-    // whole crate build. The Python loader will then fall back to PATH lookup.
+    // If `go` isn't on PATH, fail the build with a clear error message.
     let go_check = Command::new("go").arg("version").output();
     if !matches!(&go_check, Ok(o) if o.status.success()) {
-        println!(
-            "cargo:warning=Go toolchain not found; skipping nitrobox-core build. \
-             Install Go (https://go.dev/dl/) and rebuild, or set NITROBOX_CORE_BIN \
-             to a prebuilt binary."
+        panic!(
+            "Go toolchain not found! nitrobox requires Go to build. \
+             Install Go (https://go.dev/dl/) or set NITROBOX_SKIP_GO_BUILD=1 \
+             to skip (the Python loader will then fall back to PATH lookup \
+             or NITROBOX_CORE_BIN)."
         );
-        return;
     }
 
     std::fs::create_dir_all(&out_dir)

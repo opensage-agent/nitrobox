@@ -45,6 +45,17 @@ nbx = "nitrobox.cli:main"
 [project.optional-dependencies]
 dev = ["pytest>=9.0", "pytest-cov>=6.0"]
 
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "build.rs" },
+    { file = "rust/src/**/*.rs" },
+    { file = "go/**/*.go" },
+    { file = "go/go.mod" },
+    { file = "go/go.sum" },
+]
+
 [tool.maturin]
 python-source = "src"
 module-name = "nitrobox._core"
