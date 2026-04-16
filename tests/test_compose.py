@@ -1705,63 +1705,11 @@ class TestDownOptions:
         if not (os.path.isfile(bin_path) and os.access(bin_path, os.X_OK)):
             pytest.skip("requires nitrobox-core Go binary")
 
-    def test_down_rmi_all_removes_image_from_store(self, tmp_path):
-        """down(rmi='all') removes images from containers/storage."""
-        self._skip_if_no_sandbox()
-        from nitrobox.image.layers import _get_store_layers
-
-        compose = tmp_path / "docker-compose.yml"
-        compose.write_text(textwrap.dedent("""\
-            services:
-              app:
-                image: alpine:latest
-                command: "sleep infinity"
-        """))
-
-        proj = ComposeProject(
-            compose,
-            project_name="test-rmi",
-            env_base_dir=str(tmp_path / "envs"),
-        )
-        proj.up()
-        proj.services["app"].run("echo ok")
-
-        # Image should be in store after up()
-        assert _get_store_layers("alpine:latest") is not None
-
-        proj.down(rmi="all")
-
-        # Image should be removed from store after down(rmi="all")
-        assert _get_store_layers("alpine:latest") is None, \
-            "image still in containers/storage after down(rmi='all')"
-
-    def test_down_no_rmi_keeps_image_in_store(self, tmp_path):
-        """down() without rmi keeps images in containers/storage."""
-        self._skip_if_no_sandbox()
-        from nitrobox.image.layers import _get_store_layers
-
-        compose = tmp_path / "docker-compose.yml"
-        compose.write_text(textwrap.dedent("""\
-            services:
-              app:
-                image: alpine:latest
-                command: "sleep infinity"
-        """))
-
-        proj = ComposeProject(
-            compose,
-            project_name="test-no-rmi",
-            env_base_dir=str(tmp_path / "envs"),
-        )
-        proj.up()
-        proj.services["app"].run("echo ok")
-
-        assert _get_store_layers("alpine:latest") is not None
-
-        proj.down()  # no rmi
-
-        # Image should still be in store
-        assert _get_store_layers("alpine:latest") is not None
+    # NOTE: tests for down(rmi=...) image-store side effects were removed
+    # in the BuildKit migration — `nitrobox.image.layers._get_store_layers`
+    # was a containers/storage helper that no longer exists. Equivalent
+    # coverage now lives in tests/test_buildkit.py against the embedded
+    # BuildKit registry.
 
     def test_down_volumes_false_keeps_volume_dirs(self, tmp_path):
         """down(volumes=False) keeps named volume directories."""
@@ -2433,38 +2381,10 @@ class TestWriteResolv:
         ComposeProject._write_resolv(box, ["169.254.1.1"])
 
 
-class TestDigestCache:
-    """Unit tests for content-digest-based rootfs caching."""
-
-    def test_get_image_digest_returns_string(self):
-        """Known image returns a digest string."""
-        from nitrobox.sandbox import Sandbox
-        digest = Sandbox._get_image_digest("ubuntu:22.04")
-        if digest is not None:  # Docker may not be available in CI
-            assert digest.startswith("sha256_")
-            assert len(digest) > 20
-
-    def test_get_image_digest_missing_image(self):
-        """Non-existent image returns None."""
-        from nitrobox.sandbox import Sandbox
-        digest = Sandbox._get_image_digest("nonexistent-image:99.99")
-        assert digest is None
-
-    def test_get_image_digest_same_content(self):
-        """Same image name returns same digest on repeated calls."""
-        from nitrobox.sandbox import Sandbox
-        d1 = Sandbox._get_image_digest("alpine:latest")
-        d2 = Sandbox._get_image_digest("alpine:latest")
-        if d1 is not None:
-            assert d1 == d2
-
-    def test_get_image_digest_different_content(self):
-        """Different images have different digests."""
-        from nitrobox.sandbox import Sandbox
-        d1 = Sandbox._get_image_digest("ubuntu:22.04")
-        d2 = Sandbox._get_image_digest("alpine:latest")
-        if d1 is not None and d2 is not None:
-            assert d1 != d2
+# NOTE: TestDigestCache was removed in the BuildKit migration. The
+# `Sandbox._get_image_digest` helper it covered (a Docker-CLI shim used
+# by the old containers/storage path) no longer exists; image identity
+# is now resolved through the BuildKit registry instead.
 
 
 class TestLayerManifestDigestCache:
@@ -2630,8 +2550,8 @@ class TestBuildKitBuild:
             pytest.skip("buildkitd not found")
 
     def test_build_from_alpine(self, tmp_path):
-        """Build a simple Dockerfile from alpine and verify layers exist."""
-        from nitrobox.image.buildkit import BuildKitManager, get_buildkit_layers
+        """Build a simple Dockerfile from alpine and verify layers resolve."""
+        from nitrobox.image.buildkit import BuildKitManager
         ctx = tmp_path / "ctx"
         ctx.mkdir()
         (ctx / "Dockerfile").write_text(
@@ -2639,7 +2559,9 @@ class TestBuildKitBuild:
         )
         bk = BuildKitManager.get()
         result = bk.build(str(ctx), "Dockerfile", "test-buildkit-ci:latest")
-        assert result.get("layer_paths")
-        layers = get_buildkit_layers("test-buildkit-ci:latest")
-        assert layers is not None, "Built image not found in BuildKit cache"
-        assert len(layers) >= 1
+        assert result.get("layer_paths"), "build returned no layer_paths"
+        # Verify the built image is registered and resolvable
+        cached = bk.check("test-buildkit-ci:latest")
+        assert cached and cached.get("layer_paths"), \
+            "Built image not found in BuildKit registry"
+        assert len(cached["layer_paths"]) >= 1
