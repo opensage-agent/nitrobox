@@ -440,6 +440,29 @@ nitrobox buildkit-stop       # stop the managed buildkitd daemon
 nitrobox --dir /path ps      # use custom sandbox base directory
 ```
 
+## Storage layout and overrides
+
+NitroBox keeps two on-disk roots:
+
+- **Sandbox state (per-instance, ephemeral)**: `/tmp/nitrobox_<uid>/<name>/` — overlay
+  upper/work dirs, network config, pid file. Override with the `NITROBOX_ENV_BASE_DIR`
+  env var or `nitrobox --dir /path`.
+- **BuildKit data (image layers, build cache, snapshots)**: defaults to
+  `$XDG_DATA_HOME/nitrobox/buildkit` (i.e. `~/.local/share/nitrobox/buildkit`).
+  This grows to hundreds of GB on heavy build workloads (e.g. SWE-bench).
+
+To relocate the BuildKit cache to a different filesystem (recommended if `~/`
+lives on a small partition):
+
+```bash
+export XDG_DATA_HOME=/path/to/big/disk
+nitrobox setup
+# → cache now at /path/to/big/disk/nitrobox/buildkit/
+```
+
+`XDG_DATA_HOME` is the FreeDesktop standard and is also respected by podman,
+helm, cargo, and other tools, so a single export covers most of your dev env.
+
 ## Crash recovery
 
 Sandboxes auto-cleanup on process exit via `atexit`. For `kill -9` scenarios:
