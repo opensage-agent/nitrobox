@@ -6,6 +6,7 @@ package buildkit
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"maps"
 	"net"
@@ -16,12 +17,9 @@ import (
 	"sync"
 
 	"github.com/containerd/containerd/v2/core/diff/apply"
-	"github.com/containerd/containerd/v2/core/images"
 	ctdmetadata "github.com/containerd/containerd/v2/core/metadata"
 	ctdsnapshots "github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
-	digest "github.com/opencontainers/go-digest"
-	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/containerd/containerd/v2/plugins/content/local"
 	"github.com/containerd/containerd/v2/plugins/diff/walking"
 	"github.com/containerd/containerd/v2/plugins/snapshots/overlay"
@@ -65,7 +63,6 @@ type Server struct {
 	socketPath  string
 	snapshotter   snapshot.Snapshotter    // BuildKit-wrapped snapshotter
 	metaDB        *ctdmetadata.DB        // containerd metadata DB
-	imageStore    images.Store           // containerd image store (for rmi)
 	cacheManager  cache.Manager          // BuildKit cache manager
 	metadataStore *metadata.Store        // BuildKit metadata store (chain ID index)
 
@@ -186,7 +183,6 @@ func (s *Server) Start() (string, error) {
 		return "", fmt.Errorf("init metadata db: %w", err)
 	}
 	s.metaDB = mdb
-	s.imageStore = ctdmetadata.NewImageStore(mdb)
 	log("metadata DB OK")
 
 	// BuildKit-namespaced wrappers
@@ -349,53 +345,60 @@ func (s *Server) SocketPath() string { return s.socketPath }
 func (s *Server) RootDir() string { return s.rootDir }
 
 // nsCtx returns a context with the "nitrobox" namespace for image store operations.
+// nsCtx returns a context with the "buildkit" namespace — same namespace
+// BuildKit uses for content store and snapshotter. This ensures the image
+// store can see the same content blobs that BuildKit created.
 func (s *Server) nsCtx(ctx context.Context) context.Context {
-	return namespaces.WithNamespace(ctx, "nitrobox")
+	return namespaces.WithNamespace(ctx, "buildkit")
 }
 
-// RegisterImage stores an image reference in the containerd image store.
+// RegisterImage stores an image reference in the image registry file.
 func (s *Server) RegisterImage(ctx context.Context, name, manifestDigest string) error {
-	if s.imageStore == nil {
-		return fmt.Errorf("image store not initialized")
-	}
-	_, err := s.imageStore.Create(s.nsCtx(ctx), images.Image{
-		Name: name,
-		Target: ocispec.Descriptor{
-			MediaType: "application/vnd.oci.image.manifest.v1+json",
-			Digest:    digestFromString(manifestDigest),
-		},
-	})
-	if err != nil {
-		// Update if already exists
-		_, err = s.imageStore.Update(s.nsCtx(ctx), images.Image{
-			Name: name,
-			Target: ocispec.Descriptor{
-				MediaType: "application/vnd.oci.image.manifest.v1+json",
-				Digest:    digestFromString(manifestDigest),
-			},
-		})
-	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reg := s.loadRegistry()
+	reg[name] = manifestDigest
+	err := s.saveRegistry(reg)
+	appendLog(s.rootDir, fmt.Sprintf("RegisterImage(%s) -> err=%v, file=%s", name, err, s.registryPath()))
 	return err
 }
 
 // CheckImage returns the manifest digest if the image is registered, or empty string.
 func (s *Server) CheckImage(ctx context.Context, name string) string {
-	if s.imageStore == nil {
-		return ""
-	}
-	img, err := s.imageStore.Get(s.nsCtx(ctx), name)
-	if err != nil {
-		return ""
-	}
-	return img.Target.Digest.String()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reg := s.loadRegistry()
+	return reg[name]
 }
 
-// DeleteImage removes an image from the containerd image store (rmi).
+// DeleteImage removes an image from the registry (rmi).
 func (s *Server) DeleteImage(ctx context.Context, name string) error {
-	if s.imageStore == nil {
-		return fmt.Errorf("image store not initialized")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reg := s.loadRegistry()
+	delete(reg, name)
+	return s.saveRegistry(reg)
+}
+
+func (s *Server) registryPath() string {
+	return filepath.Join(s.rootDir, "image-registry.json")
+}
+
+func (s *Server) loadRegistry() map[string]string {
+	data, err := os.ReadFile(s.registryPath())
+	if err != nil {
+		return make(map[string]string)
 	}
-	return s.imageStore.Delete(s.nsCtx(ctx), name)
+	var reg map[string]string
+	if json.Unmarshal(data, &reg) != nil {
+		return make(map[string]string)
+	}
+	return reg
+}
+
+func (s *Server) saveRegistry(reg map[string]string) error {
+	data, _ := json.Marshal(reg)
+	return os.WriteFile(s.registryPath(), data, 0644)
 }
 
 // GetLayerPaths resolves a manifest digest to overlay layer directory paths.
@@ -484,6 +487,11 @@ func (s *Server) GetLayerPaths(ctx context.Context, manifestDigest string) ([]st
 	return paths, nil
 }
 
-func digestFromString(s string) digest.Digest {
-	return digest.Digest(s)
+func appendLog(rootDir, msg string) {
+	f, err := os.OpenFile(filepath.Join(rootDir, "debug.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		fmt.Fprintln(f, msg)
+		f.Close()
+	}
 }
+
