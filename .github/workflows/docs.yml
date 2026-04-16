@@ -7,6 +7,12 @@ on:
       - "docs/**"
       - "README.md"
       - "mkdocs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - "README.md"
+      - "mkdocs.yml"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 env:
@@ -39,6 +45,9 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
+    # Only deploy on push to main. Pull requests run `mkdocs build` for
+    # validation (via the build job) but must not publish.
+    if: github.event_name == 'push'
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
