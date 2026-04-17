@@ -152,8 +152,13 @@ func (s *Server) doBuild(req Request) Response {
 			"dockerfile": dockerfileDir,
 		},
 		Exports: []client.ExportEntry{{
-			Type:  client.ExporterImage,
-			Attrs: map[string]string{"name": req.Tag, "push": "false"},
+			Type: client.ExporterImage,
+			// `unpack=true` forces the image exporter to extract all
+			// layers to the snapshotter (materializing lazy blobs).
+			// Without it, BuildKit may ship a manifest that references
+			// blobs still stored as lazy descriptors — Get(Unlazy) then
+			// fails later with "missing descriptor handlers".
+			Attrs: map[string]string{"name": req.Tag, "push": "false", "unpack": "true"},
 		}},
 		Session: []session.Attachable{
 			authprovider.NewDockerAuthProvider(s.loadDockerConfig(req.DockerConfig)),
@@ -238,8 +243,9 @@ func (s *Server) doPull(req Request) Response {
 			"dockerfile": tmpDir,
 		},
 		Exports: []client.ExportEntry{{
-			Type:  client.ExporterImage,
-			Attrs: map[string]string{"name": req.ImageRef, "push": "false"},
+			Type: client.ExporterImage,
+			// See handler.go:doBuild for why unpack=true is required.
+			Attrs: map[string]string{"name": req.ImageRef, "push": "false", "unpack": "true"},
 		}},
 		Session: []session.Attachable{
 			authprovider.NewDockerAuthProvider(s.loadDockerConfig(req.DockerConfig)),
