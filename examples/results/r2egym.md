@@ -65,17 +65,6 @@ Both sides' caches were fully wiped before the cold run:
 | scrapy     | 2/4  | 2/4  | 1/4  | 2/4  |
 | tornado    | 2/2  | 1/2  | 1/2  | 1/2  |
 
-## Why wall speedup is modest vs tb2
-
-| Bench | Agent phase share of wall | Wall speedup (hot) |
-|---|---|---|
-| tb2 (terminal-bench, oracle) | ~40% | 2.11x |
-| R2E-Gym (LLM agent, 32B)     | **87%** | 1.04x |
-
-With an LLM-driven agent spending the majority of each task in inference, sandbox-level differences are amortised into a smaller wall ratio. The **per-phase numbers are still dramatic**: teardown 94–113x, env_setup 2.16x (hot), verifier 2.76x (cold).
-
-For benchmarking sandboxes specifically, the oracle agent gives sharper signal — see [`r2egym_oracle.md`](r2egym_oracle.md) (coming) for the same dataset with gold-patch replay.
-
 ## Trajectories
 
 - Cold: `/scratch/ruilin/workspace/agentdocker-lite/results/bench_r2egym_20260418_053804/cold/{docker,nitrobox}/task_*/`
@@ -115,11 +104,4 @@ python examples/bench_r2egym_e2e.py \
     --llm-base-urls "$URLS"
 ```
 
-Note: Docker Hub rate-limits authenticated pulls at 200/6h. A single cold bench consumes ~88 pulls per backend (176 total), so a back-to-back cold re-run will 429 unless you wait for the rolling window. Run oracle mode (`--agent oracle`) for rapid iteration — no LLM, no tool files copied, ~2 min end-to-end.
 
-## R2E-Gym–specific bugs uncovered & fixed during this work
-
-1. **[nitrobox #32](https://github.com/opensage-agent/nitrobox/pull/32)** — BuildKit lazy-blob resolution crash (`missing descriptor handlers for lazy blobs`) when images share a `diff_id` via different compressed-blob digests. PR bypasses `cacheManager.Get`'s lazy check by reading overlay mounts directly from the snapshotter. Verified with 2-image and 4-image minimal repros.
-2. **`NitroboxRuntime.run()` heredoc truncation** — trailing `" {args}"` (empty args → single trailing space) invalidated bash heredoc terminators (`PYEOF ` ≠ `PYEOF`). Fixed by conditionally appending args.
-3. **`NitroboxRuntime.copy_to_container()` silent failure** — `sandbox.copy_to()` writes via host-side overlay upper-dir paths which aren't visible inside the rootless userns mount namespace. Fixed by streaming file contents via base64 + heredoc through the persistent shell. Impact: without this, `env.add_commands()` silently failed, leaving `search`/`file_editor`/`execute_bash`/`finish` missing, every agent task erred with `127: No such file or directory`.
-4. **R2E-Gym `Agent.llm_base_url`** — `Agent.__init__` reads `$LLM_BASE_URL` env var globally, ignoring `args.llm_base_url`. Bench patches `agent.llm_base_url` directly per-worker so 8-vLLM round-robin actually takes effect (instead of all 16 workers hammering one server).
