@@ -105,46 +105,51 @@ ANTHROPIC_API_KEY=sk-ant-... python examples/bench_harbor_e2e.py \
     --envs docker,nitrobox
 ```
 
-## DT-Agent compose envs (`bench_dt.py`)
+## DT-Agent eval e2e (`bench_dt.py`)
 
-Pure infrastructure-overhead benchmark across the docker-compose
-environments shipped in [DecodingTrust-Agent](https://github.com/AI-secure/DecodingTrust-Agent)
-(`dt_arena/envs/<env>/docker-compose.yml`). Measures the sandbox lifecycle
-only — no LLM, no agent — to isolate the per-task overhead each backend
-adds on top of the actual task work.
+Subprocess-calls [DecodingTrust-Agent](https://github.com/AI-secure/DecodingTrust-Agent)'s
+own `eval/evaluation.py` once per backend on the same task list. Same
+shape as `bench_harbor_e2e.py` — the only thing that swaps between
+runs is the `SANDBOX_BACKEND={docker,nbx}` env var, which DT-Agent's
+`TaskExecutor` already honours. Per-instance timings come from the
+`[TIMING:{backend}:...]` lines that `utils/env_backend.py` emits.
 
 ```bash
-# 3 small envs, default 3 reset cycles
+# Default: small task list against both backends
 python examples/bench_dt.py --dt-dir /path/to/DecodingTrust-Agent
 
-# Single env, more cycles
+# Specific task list, parallel
 python examples/bench_dt.py \
     --dt-dir /path/to/DecodingTrust-Agent \
-    --envs finance --reset-cycles 5
+    --task-list scripts/e2e_task_lists/test_docker_envs.jsonl \
+    --max-parallel 4
 
-# Quantify the start_interval override gain (compare against the
-# docker-engine default of 5s)
+# Compare against docker-engine's default healthcheck start_interval
+# (5s) for nitrobox to quantify the override gain
 python examples/bench_dt.py \
     --dt-dir /path/to/DecodingTrust-Agent \
     --healthcheck-start-interval 5.0
 ```
 
-Sample warm-cache run on `finance` (single Flask service, c=1, 2 reset cycles):
+Sample warm-cache run, 1 task, c=1 (`legal/bankruptcy_law/2`):
 
-| Phase    | Docker | NitroBox | Speedup |
-|----------|-------:|---------:|--------:|
-| create   |  0.36s |    0.10s |     3.6× |
-| reset    | 10.88s |    0.11s |     99×  |
-| shutdown | 10.26s |    0.09s |    114×  |
-| **per-task overhead** | **22.0s** | **1.3s** | **17×** |
+|   Backend |  Wall | create | health | shutdown | Pass-parity |
+|-----------|------:|-------:|-------:|---------:|------------:|
+|    docker | 17.4s |  0.39s |  6.37s |   10.33s |       0/1 ✓ |
+|  nitrobox |  1.6s |  0.10s |  1.00s |    0.15s |       0/1 ✓ |
+| **speedup** | **10.97×** | **3.90×** | **6.37×** | **68.87×** | |
 
-The reset/shutdown gap is structural: nitrobox flips an overlayfs
-upper-layer rename (~30 ms) where Docker does a `stop → remove →
-create → start` cycle. Pass `--healthcheck-start-interval 0.5`
-(default) so the nitrobox health-monitor doesn't sit on the
-docker-engine default of 5 s waiting for the first probe — that
-override goes through `ComposeProject(healthcheck_overrides=...)`
-without forking the upstream compose file.
+(Both backends fail the task identically — same LLM-API config issue —
+which is exactly the parity check we want; the backends themselves
+introduce zero infra errors.)
+
+The shutdown gap (~70×) is structural: nitrobox flips an overlayfs
+upper-layer rename (~30 ms) where Docker does `stop → remove →
+network teardown → volume gc`. The health-wait gap comes from
+nitrobox's `healthcheck_overrides={"start_interval": 0.5}` (the
+`bench_dt.py` default) routing through `ComposeProject` without
+touching the upstream compose file — docker engine's own default
+keeps it on a 5 s cadence that bench_dt can't change.
 
 ## Micro Benchmark
 
