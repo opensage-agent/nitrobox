@@ -27,14 +27,16 @@ import (
 
 // Request from Python.
 type Request struct {
-	Action       string `json:"action"`        // "build", "pull", "config"
-	Dockerfile   string `json:"dockerfile"`    // for build
-	Context      string `json:"context"`       // for build
-	Tag          string `json:"tag"`           // for build/pull
-	ImageRef     string `json:"image_ref"`     // for pull
-	Digest       string `json:"digest"`        // for config
-	DockerConfig string `json:"docker_config"` // path to Docker config dir (for auth)
-	NoCache      bool   `json:"no_cache"`      // skip solver cache (force re-pull)
+	Action       string            `json:"action"`        // "build", "pull", "config"
+	Dockerfile   string            `json:"dockerfile"`    // for build
+	Context      string            `json:"context"`       // for build
+	Tag          string            `json:"tag"`           // for build/pull
+	Target       string            `json:"target"`        // for build: multi-stage target
+	BuildArgs    map[string]string `json:"build_args"`    // for build: ARG values
+	ImageRef     string            `json:"image_ref"`     // for pull
+	Digest       string            `json:"digest"`        // for config
+	DockerConfig string            `json:"docker_config"` // path to Docker config dir (for auth)
+	NoCache      bool              `json:"no_cache"`      // skip solver cache (force re-pull)
 }
 
 // Response to Python.
@@ -144,9 +146,17 @@ func (s *Server) doBuild(req Request) Response {
 		dockerfileName = filepath.Base(req.Dockerfile)
 	}
 
+	frontendAttrs := map[string]string{"filename": dockerfileName}
+	if req.Target != "" {
+		frontendAttrs["target"] = req.Target
+	}
+	for k, v := range req.BuildArgs {
+		frontendAttrs["build-arg:"+k] = v
+	}
+
 	solveOpt := client.SolveOpt{
-		Frontend: "dockerfile.v0",
-		FrontendAttrs: map[string]string{"filename": dockerfileName},
+		Frontend:      "dockerfile.v0",
+		FrontendAttrs: frontendAttrs,
 		LocalDirs: map[string]string{
 			"context":    req.Context,
 			"dockerfile": dockerfileDir,

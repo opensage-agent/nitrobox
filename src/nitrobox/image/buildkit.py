@@ -171,14 +171,31 @@ class BuildKitManager:
         except Exception:
             return None
 
-    def build(self, context: str, dockerfile: str, tag: str) -> dict:
-        """Build a Dockerfile via embedded BuildKit."""
-        return self._send_request({
+    def build(
+        self,
+        context: str,
+        dockerfile: str,
+        tag: str,
+        target: str | None = None,
+        build_args: dict[str, str] | None = None,
+    ) -> dict:
+        """Build a Dockerfile via embedded BuildKit.
+
+        ``target`` selects a stage in a multi-stage Dockerfile (compose
+        ``build.target``). ``build_args`` provides ARG values (compose
+        ``build.args``).
+        """
+        payload: dict = {
             "action": "build",
             "dockerfile": dockerfile,
             "context": context,
             "tag": tag,
-        })
+        }
+        if target:
+            payload["target"] = target
+        if build_args:
+            payload["build_args"] = {str(k): str(v) for k, v in build_args.items()}
+        return self._send_request(payload)
 
     def pull(self, image: str) -> dict:
         """Pull a pre-built image via BuildKit (always checks registry)."""
