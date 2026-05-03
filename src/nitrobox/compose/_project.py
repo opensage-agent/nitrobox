@@ -30,6 +30,14 @@ from nitrobox.compose._network import SharedNetwork, _parse_duration, _healthche
 logger = logging.getLogger(__name__)
 
 
+# Bind-address pattern for env-var port discovery in host-mode services.
+# Matches ``0.0.0.0:N``, ``127.0.0.1:N``, or bare ``:N`` — all clear
+# bind expressions. Bare numeric env values are intentionally NOT
+# matched here, since they're typically downstream-service references
+# (the consumer doesn't bind that port — the producer does).
+_BIND_RE = re.compile(r"^(?:[\d.]+)?:(?P<port>\d{2,5})$")
+
+
 # ------------------------------------------------------------------ #
 #  Health monitor (background daemon, mirrors Docker Engine)          #
 # ------------------------------------------------------------------ #
@@ -87,12 +95,17 @@ class _HealthMonitor:
                 if ec == 0:
                     self._consecutive_failures = 0
                     self.status = "healthy"
-                else:
+                elif not in_start:
                     self._consecutive_failures += 1
             except Exception:
-                self._consecutive_failures += 1
+                if not in_start:
+                    self._consecutive_failures += 1
 
-            # During start_period, failures don't count
+            # Failures during start_period are not counted at all
+            # (matches docker engine's healthcheck.go). Without this
+            # gate, a tight start_interval override accumulates enough
+            # in-start failures to immediately exceed retries the
+            # moment start_period ends → false unhealthy.
             if not in_start and self._consecutive_failures >= self._retries:
                 self.status = "unhealthy"
 
@@ -138,6 +151,7 @@ class ComposeProject:
         env: dict[str, str] | None = None,
         env_base_dir: str | None = None,
         rootfs_cache_dir: str | None = None,
+        healthcheck_overrides: dict[str, float | str] | None = None,
     ) -> None:
         if isinstance(compose_file, (str, Path)):
             compose_files = [Path(compose_file).resolve()]
@@ -155,11 +169,76 @@ class ComposeProject:
         self._env = {**os.environ, **(env or {})}
         self._env_base_dir = env_base_dir
         self._rootfs_cache_dir = rootfs_cache_dir
+        # Per-project overrides for healthcheck timing fields. Keys: any
+        # subset of {"interval", "timeout", "start_period",
+        # "start_interval", "retries"}. Override wins over whatever the
+        # compose file declared. Use case: agent-eval / RL workloads
+        # want a much tighter `start_interval` (default 5s, matching
+        # docker engine) without forking each upstream compose file.
+        self._healthcheck_overrides = healthcheck_overrides or {}
 
         self._defs, self._named_volumes = _parse_compose(
             compose_files, self._env,
         )
         self._startup_order = _topo_sort(self._defs)
+        # Pre-merge per-network port_maps: pasta runs at the SharedNetwork
+        # level (one pasta per pod), and pasta needs to know every port
+        # any member service exposes at startup. Walking services here
+        # (vs lazily when each sandbox is created) lets the first
+        # sandbox-on-network drive a SharedNetwork creation that already
+        # has the FULL port_map of all eventual members.
+        self._network_port_maps: dict[str, list[str]] = {}
+        for _svc in self._defs.values():
+            if _svc.network_mode == "none":
+                continue
+            if _svc.network_mode == "host":
+                # All host-mode services in this compose share a single
+                # synthetic ``__host__`` SharedNetwork — emulates docker's
+                # behaviour where every host-mode container actually shares
+                # one netns (the host's). Port_map is sourced from:
+                #
+                #   (a) explicit ``ports:``
+                #   (b) ``environment:`` values that are bind expressions
+                #       (``host:port`` or ``:port``)
+                #   (c) bare numeric ``environment:`` values whose KEY
+                #       contains an UPPERCASED service-name token —
+                #       discriminates "this service's bind port" from
+                #       "downstream service's port" (e.g. for
+                #       service ``slack-api``, ``SLACK_API_PORT=8034``
+                #       matches; for ``calendar-api``,
+                #       ``MAILPIT_SMTP_PORT=1025`` does not).
+                ports: list[str] = list(_svc.ports or [])
+                # Service name tokens for the bare-numeric heuristic.
+                name_tokens = {
+                    t.upper()
+                    for t in re.split(r"[-_]", _svc.name)
+                    if t and t.upper() not in ("API", "UI", "SERVER", "SERVICE", "DB")
+                }
+                for k, v in (_svc.environment or {}).items():
+                    sval = str(v).strip()
+                    m = _BIND_RE.match(sval)
+                    if m:
+                        ports.append(f"{m.group('port')}:{m.group('port')}")
+                        continue
+                    if not sval.isdigit():
+                        continue
+                    if not (1 <= len(sval) <= 5):
+                        continue
+                    upper_key = k.upper()
+                    if not upper_key.endswith("_PORT"):
+                        continue
+                    if name_tokens and not any(t in upper_key for t in name_tokens):
+                        continue
+                    ports.append(f"{sval}:{sval}")
+                self._network_port_maps.setdefault("__host__", []).extend(ports)
+                continue
+            primary_net = (_svc.networks or ["default"])[0]
+            self._network_port_maps.setdefault(primary_net, []).extend(_svc.ports or [])
+        # Dedupe each network's port_map so pasta doesn't try to bind
+        # the same host port twice (e.g. mailpit env exposes 1025 and
+        # gmail-ui env also references it).
+        for _net, _pm in self._network_port_maps.items():
+            self._network_port_maps[_net] = sorted(set(_pm))
         self._image_map = self._resolve_image_map()
         self._image_cmds: dict[str, list[str] | None] = {}  # service → image CMD
         self._image_entrypoints: dict[str, list[str] | None] = {}  # service → image ENTRYPOINT
@@ -455,9 +534,21 @@ class ComposeProject:
             build_cfg = svc.build if isinstance(svc.build, dict) else {"context": svc.build}
             context = str(build_cfg.get("context", "."))
             dockerfile = build_cfg.get("dockerfile", "Dockerfile")
+            target = build_cfg.get("target") or None
+            # compose build.args is dict OR list of "K=V" strings
+            raw_args = build_cfg.get("args")
+            build_args: dict[str, str] | None = None
+            if isinstance(raw_args, dict):
+                build_args = {str(k): str(v) for k, v in raw_args.items()}
+            elif isinstance(raw_args, list):
+                build_args = {}
+                for item in raw_args:
+                    if "=" in str(item):
+                        k, v = str(item).split("=", 1)
+                        build_args[k] = v
 
             logger.info("Building image for service %s: %s (buildkit)", name, image_name)
-            bk.build(context, dockerfile, image_name)
+            bk.build(context, dockerfile, image_name, target=target, build_args=build_args)
 
         return mapping
 
@@ -527,13 +618,12 @@ class ComposeProject:
         img_cfg = get_image_config(image) or {}
         self._image_cmds[svc.name] = img_cfg.get("cmd")
         self._image_entrypoints[svc.name] = img_cfg.get("entrypoint")
+        # Fall back to image's WORKDIR when compose doesn't override.
+        # Docker uses image WORKDIR (e.g. node images set /usr/src/app);
+        # without this, image-default CMDs that assume cwd break.
+        image_workdir = img_cfg.get("working_dir") or "/"
 
         volumes = self._resolve_volumes(svc)
-
-        # Port mapping: only needed for non-host networking
-        port_map = None
-        if svc.network_mode != "host" and svc.ports:
-            port_map = svc.ports
 
         # seccomp: disabled if security_opt includes seccomp:unconfined
         # or if privileged
@@ -544,36 +634,64 @@ class ComposeProject:
 
         # Network namespace strategy:
         # - network_mode: none → isolated loopback-only network (no internet)
-        # - network_mode: host → share host network directly
+        # - network_mode: host → share host network directly; per-sandbox
+        #   pasta is unused (host net needs no NAT).
         # - Otherwise → shared userns+netns per compose network (Podman
-        #   pod model).  Services on the same network share a netns and
-        #   can communicate via localhost.  Different networks are
-        #   isolated (different netns).
+        #   pod model). Services on the same network share a netns and
+        #   can communicate via localhost. The single SharedNetwork-level
+        #   pasta forwards every member service's port_map to the host;
+        #   per-sandbox pasta MUST be skipped here, otherwise it would
+        #   `unshare(CLONE_NEWNET)` and silently move the sandbox out of
+        #   the shared netns, breaking inter-service connectivity.
         shared_userns = None
         net_ns = None
         net_isolate = False
+        # Default: per-sandbox port_map (used by host-net + standalone Sandbox).
+        port_map = svc.ports if (svc.network_mode != "host" and svc.ports) else None
 
         if svc.network_mode == "none":
-            # Docker "none" = loopback only, no external connectivity.
             net_isolate = True
-        elif svc.network_mode != "host":
+        elif svc.network_mode == "host":
+            # Pool every host-mode service in the compose into a single
+            # synthetic ``__host__`` SharedNetwork (built lazily). One
+            # pasta forwards the union of every host-mode service's
+            # bind ports; member sandboxes share that netns so each
+            # service binds 0.0.0.0:N inside the shared netns and
+            # pasta surfaces it on the host's 0.0.0.0:N — which is
+            # exactly what docker's host mode achieves.
+            if "__host__" not in self._shared_nets:
+                self._shared_nets["__host__"] = SharedNetwork(
+                    "__host__",
+                    internet=True,
+                    port_map=self._network_port_maps.get("__host__", []),
+                )
+            sn = self._shared_nets["__host__"]
+            shared_userns = sn.userns_path
+            net_ns = sn.netns_path
+            port_map = None
+        else:
             net_names = svc.networks or ["default"]
             primary_net = net_names[0]
             if primary_net not in self._shared_nets:
                 self._shared_nets[primary_net] = SharedNetwork(
                     primary_net,
                     internet=True,
-                    port_map=svc.ports or [],
+                    # Merged port_map of every service that joins this
+                    # network — pre-collected in __init__.
+                    port_map=self._network_port_maps.get(primary_net, []),
                 )
             sn = self._shared_nets[primary_net]
             shared_userns = sn.userns_path
             net_ns = sn.netns_path
+            # SharedNetwork's pasta already owns this service's port
+            # forwards; tell the per-sandbox pasta path to stay out.
+            port_map = None
 
         sandbox_name = f"{self._project_name}_{svc.name}"
 
         config_kwargs: dict[str, Any] = dict(
             image=image,
-            working_dir=svc.working_dir or "/",
+            working_dir=svc.working_dir or image_workdir,
             environment=svc.environment,
             volumes=volumes,
             devices=svc.devices,
@@ -758,6 +876,10 @@ class ComposeProject:
         """
         if not policy or policy in ("no", "never", '"no"'):
             return cmd
+        # Strip trailing whitespace/newlines: YAML folded scalars (``>``)
+        # leave a trailing ``\n``, and gluing ``; _rc=$?`` after a newline
+        # produces a bash syntax error.
+        cmd = cmd.rstrip()
         # on-failure: stop loop on exit 0
         stop_on_ok = "[ $_rc -eq 0 ] && break; " if policy == "on-failure" else ""
         return (
@@ -811,14 +933,26 @@ class ComposeProject:
         if old is not None:
             old.stop()
 
+        # healthcheck_overrides win over compose-declared values, so a
+        # caller can globally tighten poll cadence without forking each
+        # upstream compose file.
+        def _hc(field: str, default: str) -> float:
+            override = self._healthcheck_overrides.get(field)
+            if override is not None:
+                return float(override) if not isinstance(override, str) else _parse_duration(override)
+            return _parse_duration(hc.get(field, default))
+
+        retries_override = self._healthcheck_overrides.get("retries")
+        retries = int(retries_override) if retries_override is not None else int(hc.get("retries", 3))
+
         self._health_monitors[name] = _HealthMonitor(
             self._sandboxes[name],
             cmd,
-            interval=_parse_duration(hc.get("interval", "30s")),
-            timeout=_parse_duration(hc.get("timeout", "30s")),
-            start_period=_parse_duration(hc.get("start_period", "0s")),
-            start_interval=_parse_duration(hc.get("start_interval", "5s")),
-            retries=int(hc.get("retries", 3)),
+            interval=_hc("interval", "30s"),
+            timeout=_hc("timeout", "30s"),
+            start_period=_hc("start_period", "0s"),
+            start_interval=_hc("start_interval", "5s"),
+            retries=retries,
         )
 
     def _wait_healthy(self, name: str, timeout: int) -> None:

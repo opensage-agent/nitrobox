@@ -239,7 +239,7 @@ _SUPPORTED_SERVICE_KEYS = frozenset({
     "network_mode", "dns", "hostname", "working_dir", "restart",
     "security_opt", "cap_add", "cap_drop", "privileged",
     "stop_signal", "stop_grace_period",
-    "ulimits", "shm_size", "tmpfs", "cpu_shares",
+    "ulimits", "shm_size", "tmpfs", "cpus", "cpu_shares",
     "mem_limit", "memswap_limit", "env_file",
     # Functional support
     "extra_hosts", "sysctls",
@@ -439,7 +439,13 @@ def _parse_compose(
             networks=list(svc["networks"]) if isinstance(svc.get("networks"), (list, dict)) else [],
             shm_size=svc.get("shm_size"),
             tmpfs=tmpfs_list,
-            cpus=str(deploy_cpus) if deploy_cpus else None,
+            # Service-level `cpus:` is the legacy compose-v2 shortcut for
+            # `deploy.resources.limits.cpus`; docker-compose still
+            # accepts both, so do we (service-level wins).
+            cpus=(
+                str(svc["cpus"]) if svc.get("cpus") is not None
+                else (str(deploy_cpus) if deploy_cpus else None)
+            ),
             cpu_shares=int(svc["cpu_shares"]) if svc.get("cpu_shares") else None,
             mem_limit=svc.get("mem_limit") or (str(deploy_memory) if deploy_memory else None),
             memswap_limit=svc.get("memswap_limit"),

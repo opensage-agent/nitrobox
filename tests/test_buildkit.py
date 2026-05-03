@@ -167,39 +167,47 @@ class TestBuildKitLayerCache:
         _requires_gobin()
         _requires_rootlesskit()
 
-        from nitrobox.image.buildkit import BuildKitManager, get_buildkit_layers
+        from nitrobox.image.buildkit import BuildKitManager
         bk = BuildKitManager.get()
 
         df = tmp_path / "Dockerfile"
         df.write_text("FROM alpine:latest\nRUN echo test\n")
 
         tag = "test-bk-layer-cache"
-        bk.build(str(tmp_path), "Dockerfile", tag)
+        result = bk.build(str(tmp_path), "Dockerfile", tag)
 
-        layers = get_buildkit_layers(tag)
-        assert layers is not None
-        assert len(layers) > 0
+        # Build must return overlay layer paths…
+        paths = result.get("layer_paths")
+        assert paths, f"build returned no layer_paths: {result}"
+
+        # …and `check` must return the same set (idempotent cache probe).
+        cached = bk.check(tag)
+        assert cached is not None
+        assert cached.get("layer_paths") == paths
 
     def test_config_cache_populated_after_build(self, tmp_path):
         _requires_buildkitd()
         _requires_gobin()
         _requires_rootlesskit()
 
-        from nitrobox.image.buildkit import BuildKitManager, get_buildkit_config
+        from nitrobox.image.buildkit import BuildKitManager
         bk = BuildKitManager.get()
 
         df = tmp_path / "Dockerfile"
         df.write_text("FROM alpine:latest\nWORKDIR /app\nENV FOO=bar\n")
 
         tag = "test-bk-config-cache"
-        bk.build(str(tmp_path), "Dockerfile", tag)
+        result = bk.build(str(tmp_path), "Dockerfile", tag)
 
-        cfg = get_buildkit_config(tag)
-        assert cfg is not None
+        md = result.get("manifest_digest")
+        assert md, f"build returned no manifest_digest: {result}"
+
+        cfg = bk.read_image_config(md)
+        assert cfg, f"read_image_config returned empty: {cfg}"
         config = cfg.get("config", {})
         assert config.get("WorkingDir") == "/app"
         env = config.get("Env", [])
-        assert any("FOO=bar" in e for e in env)
+        assert any("FOO=bar" in e for e in env), f"FOO=bar missing in {env}"
 
 
 class TestBuildKitCLI:

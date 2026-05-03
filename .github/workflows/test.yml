@@ -41,17 +41,19 @@ jobs:
       - run: python -m pytest tests/test_cli.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-rootless-cli.xml
       - run: python -m pytest tests/test_registry.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-rootless-registry.xml
       - run: python -m pytest tests/test_whiteout.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-rootless-whiteout.xml
-      - run: python -m pytest tests/test_rust_core.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-rootless.xml
+      - run: python -m pytest tests/test_rust_core.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-rootless-rust-core.xml
+      - run: python -m pytest tests/test_buildkit.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-rootless-buildkit.xml
+      - run: python -m pytest tests/test_sandbox.py -v --cov=nitrobox --cov-append --cov-report=xml:coverage-rootless.xml
       - uses: actions/upload-artifact@v7
         if: matrix.os == 'ubuntu-24.04' && matrix.python-version == '3.13'
         with:
           name: coverage-rootless
           path: coverage-rootless.xml
 
-  # root:
-  #   Temporarily disabled — root tests have pre-existing failures
-  #   (Docker API, port map cleanup) unrelated to current changes.
-  #   Re-enable after fixing test_sandbox.py root-mode issues.
+  # root: sandbox tests requiring real root (overlayfs mount, cgroup) are
+  # still off-CI — the runners don't provide a usable root path. The
+  # rootless matrix above covers the user-namespace code path which is
+  # what nitrobox users actually use.
 
   coverage:
     name: Upload coverage

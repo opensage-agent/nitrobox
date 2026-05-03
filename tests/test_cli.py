@@ -26,10 +26,19 @@ def _requires_gobin():
         pytest.skip("requires nitrobox-core Go binary")
 
 
-def _nbx(*args: str) -> subprocess.CompletedProcess:
+def _nbx(
+    *args: str,
+    env: dict | None = None,
+    input: str | None = None,
+    timeout: int = 10,
+) -> subprocess.CompletedProcess:
+    run_env = dict(os.environ)
+    if env:
+        run_env.update(env)
     return subprocess.run(
         ["python", "-m", "nitrobox.cli", *args],
-        capture_output=True, text=True, timeout=10,
+        capture_output=True, text=True, timeout=timeout,
+        env=run_env, input=input,
     )
 
 
@@ -192,3 +201,94 @@ class TestCli:
             pass  # shell already dead, delete may partially fail
         # cleanup_stale handles the rest
         Sandbox.cleanup_stale(env_dir)
+
+
+class TestImageAndPruneCli:
+    """image ls / image rm / buildkit-prune — cache management commands.
+
+    These point XDG_DATA_HOME at a tmp dir so they don't touch the user's
+    real BuildKit cache.
+    """
+
+    def test_image_ls_no_cache(self, tmp_path):
+        """image ls on a clean XDG dir prints 'No images cached.'"""
+        result = _nbx("image", "ls", env={"XDG_DATA_HOME": str(tmp_path)})
+        assert result.returncode == 0
+        assert "No images cached" in result.stdout
+
+    def test_image_ls_with_fake_registry(self, tmp_path):
+        """image ls reads from image-registry.json and formats the listing."""
+        import json
+        bk = tmp_path / "nitrobox" / "buildkit"
+        bk.mkdir(parents=True)
+        (bk / "image-registry.json").write_text(json.dumps({
+            "alpine:3.20": "sha256:abc123def456" + "0" * 52,
+            "python:3.12-slim": "sha256:fedcba987654" + "0" * 52,
+        }))
+
+        result = _nbx("image", "ls", env={"XDG_DATA_HOME": str(tmp_path)})
+        assert result.returncode == 0
+        assert "alpine:3.20" in result.stdout
+        assert "python:3.12-slim" in result.stdout
+        assert "abc123def456" in result.stdout   # first 12 chars of digest
+        assert "2 image(s)" in result.stdout
+
+    def test_image_rm_unknown_image_warns_not_fatal(self, tmp_path):
+        """rm of an unregistered image warns but exits 0 — delete is best-effort."""
+        _requires_gobin()
+        bk = tmp_path / "nitrobox" / "buildkit"
+        bk.mkdir(parents=True)
+        (bk / "image-registry.json").write_text("{}")
+
+        result = _nbx(
+            "image", "rm", "does-not-exist:v1",
+            env={"XDG_DATA_HOME": str(tmp_path)},
+        )
+        assert result.returncode == 0, result.stderr
+        assert "not in registry" in result.stderr
+        assert "Deleted: does-not-exist:v1" in result.stdout
+
+    def test_buildkit_prune_abort_preserves_state(self, tmp_path):
+        """buildkit-prune with 'n' at the prompt aborts without touching state."""
+        bk = tmp_path / "nitrobox" / "buildkit"
+        bk.mkdir(parents=True)
+        (bk / "image-registry.json").write_text('{"alpine:3.20": "sha256:abc"}')
+        (bk / "runc-overlayfs").mkdir()
+
+        result = _nbx(
+            "buildkit-prune",
+            env={"XDG_DATA_HOME": str(tmp_path)},
+            input="n\n",
+        )
+        assert result.returncode == 0
+        assert "Aborted" in result.stdout
+        # State must still be there.
+        assert (bk / "image-registry.json").exists()
+        assert (bk / "runc-overlayfs").exists()
+
+    def test_buildkit_prune_no_state(self, tmp_path):
+        """buildkit-prune on a missing cache dir is a no-op."""
+        result = _nbx(
+            "buildkit-prune", "--yes",
+            env={"XDG_DATA_HOME": str(tmp_path)},
+        )
+        assert result.returncode == 0
+        assert "No BuildKit state" in result.stdout
+
+    def test_buildkit_prune_with_yes_wipes(self, tmp_path):
+        """buildkit-prune --yes deletes the directory without prompting."""
+        bk = tmp_path / "nitrobox" / "buildkit"
+        bk.mkdir(parents=True)
+        (bk / "image-registry.json").write_text('{}')
+        (bk / "marker.txt").write_text("will-be-deleted")
+
+        # With --yes we skip the prompt; daemon-stop is a no-op when no
+        # daemon is running for this XDG root.
+        result = _nbx(
+            "buildkit-prune", "--yes",
+            env={"XDG_DATA_HOME": str(tmp_path)},
+            timeout=30,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "Pruned" in result.stdout
+        assert not bk.exists()

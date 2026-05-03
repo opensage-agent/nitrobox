@@ -457,7 +457,21 @@ fn mount_volumes(config: &SandboxSpawnConfig) {
             config.rootfs,
             container_path.trim_start_matches('/')
         );
-        let _ = std::fs::create_dir_all(&target);
+        // Bind-mount source kind dictates target kind: file→file, dir→dir.
+        // The kernel rejects file→dir with ENOTDIR. "cow" always overlays
+        // a directory, so it keeps the dir-creation path.
+        let host_meta = std::fs::metadata(host_path).ok();
+        let host_is_file = matches!(&host_meta, Some(m) if m.is_file());
+        if host_is_file && mode != "cow" {
+            if let Some(parent) = std::path::Path::new(&target).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if !std::path::Path::new(&target).exists() {
+                let _ = std::fs::File::create(&target);
+            }
+        } else {
+            let _ = std::fs::create_dir_all(&target);
+        }
 
         match mode {
             "cow" => {
@@ -589,8 +603,24 @@ fn precreate_volume_mountpoints(config: &SandboxSpawnConfig) {
         if parts.len() < 2 {
             continue;
         }
+        let host_path = parts[0];
+        let mode = if parts.len() > 2 { parts[2] } else { "rw" };
         let target = format!("{}/{}", config.rootfs, parts[1].trim_start_matches('/'));
-        let _ = std::fs::create_dir_all(&target);
+        // Bind-mount target kind must match host kind: file→file, dir→dir.
+        // The kernel rejects file→dir with ENOTDIR. "cow" always overlays
+        // a directory, so it keeps the dir-creation path.
+        let host_meta = std::fs::metadata(host_path).ok();
+        let host_is_file = matches!(&host_meta, Some(m) if m.is_file());
+        if host_is_file && mode != "cow" {
+            if let Some(parent) = std::path::Path::new(&target).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if !std::path::Path::new(&target).exists() {
+                let _ = std::fs::File::create(&target);
+            }
+        } else {
+            let _ = std::fs::create_dir_all(&target);
+        }
     }
 }
 
@@ -940,7 +970,6 @@ fn mount_volumes_at(volumes: &[String], rootfs: &str, env_dir: Option<&str>, hos
         let container_path = parts[1];
         let mode = if parts.len() > 2 { parts[2] } else { "rw" };
         let target = format!("{}/{}", rootfs, container_path.trim_start_matches('/'));
-        let _ = std::fs::create_dir_all(&target);
 
         // Resolve host path through the old root if a prefix is given.
         let host_path_owned;
@@ -950,6 +979,20 @@ fn mount_volumes_at(volumes: &[String], rootfs: &str, env_dir: Option<&str>, hos
             host_path_owned = format!("{}/{}", host_prefix, raw_host_path.trim_start_matches('/'));
             host_path_owned.as_str()
         };
+
+        // Bind-mount source kind dictates target kind: file→file, dir→dir.
+        let host_meta = std::fs::metadata(host_path).ok();
+        let host_is_file = matches!(&host_meta, Some(m) if m.is_file());
+        if host_is_file && mode != "cow" {
+            if let Some(parent) = std::path::Path::new(&target).parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if !std::path::Path::new(&target).exists() {
+                let _ = std::fs::File::create(&target);
+            }
+        } else {
+            let _ = std::fs::create_dir_all(&target);
+        }
 
         match mode {
             "cow" => {

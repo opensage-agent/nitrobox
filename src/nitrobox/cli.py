@@ -149,6 +149,113 @@ def cmd_kill(args: argparse.Namespace) -> None:
 
 
 
+def _buildkit_root() -> Path:
+    from nitrobox.image.buildkit import _default_buildkit_root
+    return Path(_default_buildkit_root())
+
+
+def _image_registry() -> dict:
+    reg = _buildkit_root() / "image-registry.json"
+    if not reg.exists():
+        return {}
+    import json
+    try:
+        return json.loads(reg.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def cmd_image_ls(args: argparse.Namespace) -> None:
+    registry = _image_registry()
+    if not registry:
+        print("No images cached.")
+        return
+
+    print(f"{'IMAGE':<70} {'DIGEST':<20}")
+    print("-" * 95)
+    for image, digest in sorted(registry.items()):
+        # Trim "sha256:" prefix, show first 12 chars like docker
+        short = digest.split(":", 1)[-1][:12] if digest else "—"
+        # Truncate long names instead of wrapping
+        shown = image if len(image) <= 69 else image[:66] + "..."
+        print(f"{shown:<70} {short:<20}")
+    print(f"\n{len(registry)} image(s)")
+
+
+def cmd_image_rm(args: argparse.Namespace) -> None:
+    registry = _image_registry()
+    targets = list(args.images)
+
+    in_registry = [i for i in targets if i in registry]
+    missing = [i for i in targets if i not in registry]
+
+    if missing:
+        print(
+            f"Warning: not in registry: {', '.join(missing)}",
+            file=sys.stderr,
+        )
+
+    # Skip the (slow + side-effecting) buildkitd spawn when nothing
+    # we're asked to delete is actually in the cache. `docker rmi`
+    # behaves the same — non-existent images are a no-op, not fatal.
+    if in_registry:
+        from nitrobox.image.buildkit import BuildKitManager
+        bk = BuildKitManager.get()
+        for image in in_registry:
+            bk.delete_image(image)
+
+    for image in targets:
+        print(f"Deleted: {image}")
+
+
+def cmd_buildkit_prune(args: argparse.Namespace) -> None:
+    root = _buildkit_root()
+    if not root.exists():
+        print("No BuildKit state to prune.")
+        return
+
+    if not args.yes:
+        # Rough size — du exits non-zero on subuid subdirs (permission
+        # denied on foreign-UID work dirs) but still prints the total.
+        size = "?"
+        try:
+            import subprocess
+            r = subprocess.run(
+                ["du", "-sh", str(root)],
+                capture_output=True, text=True, timeout=10,
+            )
+            parts = r.stdout.split()
+            if parts:
+                size = parts[0]
+        except Exception:
+            pass
+        registry = _image_registry()
+        print(
+            f"This will delete ALL cached BuildKit state at\n"
+            f"  {root}\n"
+            f"  (~{size}, {len(registry)} image(s) registered)\n"
+            f"Every image will need to be re-pulled on next use.\n"
+        )
+        reply = input("Proceed? [y/N]: ").strip().lower()
+        if reply not in ("y", "yes"):
+            print("Aborted.")
+            return
+
+    # Stop the daemon first — it holds lock files and will fight the rm.
+    from nitrobox.image.buildkit import BuildKitManager
+    BuildKitManager.get().stop()
+
+    # rmtree_mapped forks into a userns to rm files owned by subuids
+    # (snapshot fs dirs contain files written by sandbox-root).
+    from nitrobox.image.layers import rmtree_mapped
+    rmtree_mapped(root)
+
+    if root.exists():
+        print(f"Warning: {root} still exists — partial rm?", file=sys.stderr)
+        sys.exit(1)
+    print(f"Pruned: {root}")
+
+
 def cmd_setup(args: argparse.Namespace) -> None:
     """Set up rootless prerequisites using Docker (no sudo required)."""
     import shutil
@@ -407,6 +514,21 @@ def main() -> None:
 
     sub.add_parser("buildkit-stop", help="stop the managed buildkitd daemon")
 
+    prune_p = sub.add_parser(
+        "buildkit-prune",
+        help="wipe the BuildKit cache (stops daemon, removes all cached images)",
+    )
+    prune_p.add_argument(
+        "-y", "--yes", action="store_true",
+        help="skip confirmation prompt",
+    )
+
+    img_p = sub.add_parser("image", help="manage cached images")
+    img_sub = img_p.add_subparsers(dest="image_command")
+    img_sub.add_parser("ls", help="list cached images")
+    rm_p = img_sub.add_parser("rm", help="delete one or more images from cache")
+    rm_p.add_argument("images", nargs="+", metavar="IMAGE", help="image reference(s)")
+
     args = parser.parse_args()
 
     if args.command == "ps":
@@ -421,6 +543,15 @@ def main() -> None:
         from nitrobox.image.buildkit import BuildKitManager
         BuildKitManager.get().stop()
         print("buildkitd stopped")
+    elif args.command == "buildkit-prune":
+        cmd_buildkit_prune(args)
+    elif args.command == "image":
+        if args.image_command == "ls":
+            cmd_image_ls(args)
+        elif args.image_command == "rm":
+            cmd_image_rm(args)
+        else:
+            img_p.print_help()
     else:
         parser.print_help()
 

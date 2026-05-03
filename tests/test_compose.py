@@ -1157,6 +1157,99 @@ class TestComposeProject:
         finally:
             proj.down()
 
+    def test_port_map_service_stays_on_shared_netns(self, tmp_path, shared_cache_dir):
+        """Regression: a service that declares ``ports:`` must stay on the
+        compose's shared netns, not get moved to a per-sandbox pasta netns.
+
+        Bug history: setup_pasta_networking() unconditionally
+        ``unshare(CLONE_NEWNET)``'d, even for sandboxes that had already
+        joined a SharedNetwork.  Net effect was that any service with
+        ``ports:`` lost connectivity to its compose siblings — DT-Agent
+        salesforce_crm couldn't reach mariadb because salesforce had
+        ``ports: 8080:8080`` declared.
+        """
+        self._skip_if_no_sandbox()
+
+        # Two services on the default network. server runs nc listening
+        # on TCP/12345 inside the shared netns; client should be able to
+        # reach it via 127.0.0.1. server ALSO declares ``ports:`` so the
+        # buggy code path moves it into its own pasta netns.
+        compose = tmp_path / "docker-compose.yml"
+        compose.write_text(textwrap.dedent("""\
+            services:
+              server:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                ports:
+                  - "18765:12345"
+              client:
+                image: ubuntu:22.04
+                command: "sleep infinity"
+                depends_on:
+                  - server
+        """))
+
+        proj = ComposeProject(
+            compose,
+            project_name="test-shared-ports",
+            env_base_dir=str(tmp_path / "envs"),
+            rootfs_cache_dir=shared_cache_dir,
+        )
+        try:
+            proj.up(detach=True)
+
+            # Both should land on the same netns even though server has ports.
+            srv_ns, _ = proj.services["server"].run("readlink /proc/1/ns/net")
+            cli_ns, _ = proj.services["client"].run("readlink /proc/1/ns/net")
+            assert srv_ns.strip() == cli_ns.strip(), (
+                "Service with ports: was moved to its own pasta netns "
+                f"(server={srv_ns.strip()} client={cli_ns.strip()}) — "
+                "regression of per-sandbox setup_pasta_networking"
+            )
+
+            # And the shared netns is the SharedNetwork's sentinel netns.
+            sn = proj._shared_nets["default"]
+            sentinel_ns = os.readlink(sn.netns_path)
+            assert srv_ns.strip() == sentinel_ns, (
+                f"Server netns ({srv_ns.strip()}) ≠ SharedNetwork "
+                f"sentinel netns ({sentinel_ns})"
+            )
+
+            # Functional check: client can reach a TCP listener the
+            # server binds inside the shared netns. Use bash/coreutils
+            # only (ubuntu:22.04 has no python3 / nc out of the box).
+            # bash's /dev/tcp pseudo-device + a here-doc fed via exec
+            # gives us a one-shot listener via `socat`-free shell.
+            # (We use `python3` would be cleaner but isn't available.)
+            #
+            # Simpler protocol: server writes a sentinel file on its own
+            # /shared mount; client reads back over TCP via /dev/tcp.
+            # If client can open the TCP socket, the netns is shared.
+            proj.services["server"].run(
+                "( while true; do echo pong; sleep 1; done | "
+                "bash -c 'exec 3<>/dev/tcp/0.0.0.0/12345; "
+                "exec ncat -lk -p 12345' 2>/dev/null ) &"
+            )
+            # Easier: use the bash /dev/tcp client side only — a
+            # successful connect proves the two sandboxes share a netns.
+            time.sleep(1)
+            out, rc = proj.services["client"].run(
+                "exec 3<>/dev/tcp/127.0.0.1/12345 2>&1 && "
+                "echo CONNECTED || echo REFUSED"
+            )
+            # If "CONNECTED" appears OR even the bash error message says
+            # "Connection refused" (vs "Network is unreachable"), the
+            # netns is reachable. The buggy code path produces "Network
+            # is unreachable" because client and server are in
+            # different netns. Either way, what we really care about is
+            # the netns assertion above; this is just defensive.
+            assert "Network is unreachable" not in out, (
+                f"Client got 'Network is unreachable' — different netns "
+                f"(out={out!r})"
+            )
+        finally:
+            proj.down()
+
     def test_different_networks_isolated(self, tmp_path, shared_cache_dir):
         """Services on different networks have different netns."""
         self._skip_if_no_sandbox()

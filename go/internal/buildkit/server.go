@@ -15,8 +15,10 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/diff/apply"
+	"github.com/containerd/containerd/v2/core/leases"
 	ctdmetadata "github.com/containerd/containerd/v2/core/metadata"
 	ctdsnapshots "github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/pkg/namespaces"
@@ -27,6 +29,7 @@ import (
 
 	"github.com/moby/buildkit/cache"
 	"github.com/moby/buildkit/cache/metadata"
+	"github.com/moby/buildkit/identity"
 	"github.com/moby/buildkit/control"
 	"github.com/moby/buildkit/executor/oci"
 	"github.com/moby/buildkit/executor/resources"
@@ -62,9 +65,11 @@ type Server struct {
 	listener    net.Listener
 	socketPath  string
 	snapshotter   snapshot.Snapshotter    // BuildKit-wrapped snapshotter
+	snapshotterName string                // name of the snapshotter (e.g. "overlayfs")
 	metaDB        *ctdmetadata.DB        // containerd metadata DB
 	cacheManager  cache.Manager          // BuildKit cache manager
 	metadataStore *metadata.Store        // BuildKit metadata store (chain ID index)
+	leaseManager  leases.Manager          // lease manager for pinning snapshots against GC
 
 	mu       sync.Mutex
 	started  bool
@@ -190,6 +195,8 @@ func (s *Server) Start() (string, error) {
 	lm := leaseutil.WithNamespace(ctdmetadata.NewLeaseManager(mdb), "buildkit")
 	snap := containerdsnapshot.NewSnapshotter(snName, mdb.Snapshotter(snName), "buildkit", nil)
 	s.snapshotter = snap
+	s.snapshotterName = snName
+	s.leaseManager = lm
 
 	// Migrate metadata
 	if err := cache.MigrateV2(
@@ -293,6 +300,23 @@ func (s *Server) Start() (string, error) {
 	s.controller = ctrl
 
 	log("controller OK")
+
+	// Clean up any "nitrobox-layers-*" view keys left behind by a
+	// previous crash between View() and Remove() in GetLayerPaths.
+	// Leaving them would just consume inodes — they can't cause
+	// "already exists" for new keys because we use identity.NewID() —
+	// but they also keep their parent chain pinned against GC, which
+	// we don't want.
+	if err := s.snapshotter.Walk(ctx, func(ctx context.Context, info ctdsnapshots.Info) error {
+		if strings.HasPrefix(info.Name, "nitrobox-layers-") {
+			if err := s.snapshotter.Remove(ctx, info.Name); err != nil {
+				log(fmt.Sprintf("cleanup stale view %s: %v", info.Name, err))
+			}
+		}
+		return nil
+	}); err != nil {
+		log(fmt.Sprintf("startup cleanup walk: %v", err))
+	}
 
 	log("starting gRPC server...")
 	s.grpcServer = grpc.NewServer()
@@ -402,12 +426,31 @@ func (s *Server) saveRegistry(reg map[string]string) error {
 }
 
 // GetLayerPaths resolves a manifest digest to overlay layer directory paths.
-// Uses BuildKit's cache manager to find the snapshot ref by chain ID,
-// then calls ref.Mount() to get the actual overlay mount paths.
-// This is the correct API — no direct snapshotter key guessing needed.
+//
+// Talks to the snapshotter directly instead of going through
+// cacheManager.Get — the cache manager's Get runs a `checkLazyProviders`
+// walk over every ancestor and refuses to return a ref if any ancestor
+// is flagged "lazy" in metadata without a matching DescHandler in the
+// session. BuildKit sometimes leaves intermediate refs flagged lazy
+// after a successful build+export even when the snapshot is on disk
+// (observed when a prior solve's metadata hints an image's descriptors
+// so the next solve's blob download is skipped, leaving the on-disk
+// snapshot + lazy metadata). Going through the snapshotter sidesteps
+// that check entirely.
+//
+// When BuildKit commits a layer snapshot it uses the chainID as the
+// snapshotter key (cache/manager.go:`snapshotID := chainID.String()`),
+// so View(chainID) gives us the overlay mount for the final chain.
 func (s *Server) GetLayerPaths(ctx context.Context, manifestDigest string) ([]string, error) {
-	if s.cacheManager == nil {
-		return nil, fmt.Errorf("cache manager not initialized")
+	if s.snapshotter == nil {
+		return nil, fmt.Errorf("snapshotter not initialized")
+	}
+	// Hard-gate on a real overlay snapshotter. A remote snapshotter
+	// (stargz, nydus, overlaybd) would hand us FUSE paths that aren't
+	// usable by nitrobox's own overlay mount, and we'd silently break
+	// instead of failing loudly.
+	if s.snapshotterName != "overlayfs" && s.snapshotterName != "overlay" {
+		return nil, fmt.Errorf("unsupported snapshotter %q (need overlayfs)", s.snapshotterName)
 	}
 
 	// Read manifest → config → diff IDs from content store
@@ -428,41 +471,63 @@ func (s *Server) GetLayerPaths(ctx context.Context, manifestDigest string) ([]st
 	if len(chainIDs) == 0 {
 		return nil, fmt.Errorf("no layers in image")
 	}
-
-	// Search BuildKit's metadata store for the cache record matching
-	// the final chain ID, then use the cache manager to get the ref.
 	finalChainID := chainIDs[len(chainIDs)-1]
 
-	// Search index: "chainid:sha256:xxx"
+	// Find the cache record for this chain, then read its stored
+	// snapshot ID. BuildKit commits with chainID as the snapshotter key
+	// for fresh records, but dedup'd chains (where Get linked to an
+	// existing ancestor) use the linked record's snapshot ID, so we
+	// can't just View(chainID) blindly.
 	sis, err := s.metadataStore.Search(ctx, "chainid:"+finalChainID, false)
 	if err != nil || len(sis) == 0 {
-		return nil, fmt.Errorf("chain %s not found in metadata (search err: %v, results: %d)",
+		return nil, fmt.Errorf("chain %s not found in metadata (err: %v, results: %d)",
 			finalChainID[:20], err, len(sis))
 	}
-	recordID := sis[0].ID()
-
-	// Pass Unlazy session to force layer extraction (otherwise lazy blobs
-	// from pull-only operations won't be unpacked to the snapshotter).
-	ref, err := s.cacheManager.Get(ctx, recordID, nil, cache.Unlazy(session.NewGroup()))
-	if err != nil {
-		return nil, fmt.Errorf("cache get %s: %w", finalChainID[:20], err)
+	snapshotID := finalChainID
+	if v := sis[0].Get("cache.snapshot"); v != nil {
+		var s string
+		if err := v.Unmarshal(&s); err == nil && s != "" {
+			snapshotID = s
+		}
 	}
-	defer ref.Release(context.TODO())
 
-	// Mount read-only to get overlay mount info
-	mountable, err := ref.Mount(ctx, true, session.NewGroup())
-	if err != nil {
-		return nil, fmt.Errorf("mount: %w", err)
+	// Pin the parent snapshot against background GC while we hold the
+	// View. buildkitd runs gc periodically; without a lease, the parent
+	// chain (and therefore our view) could be evicted mid-read. The
+	// lease is short-lived — it only needs to survive this call.
+	if s.leaseManager != nil {
+		leaseCtx, done, err := leaseutil.WithLease(ctx, s.leaseManager,
+			leases.WithExpiration(5*time.Minute), leaseutil.MakeTemporary)
+		if err != nil {
+			return nil, fmt.Errorf("acquire lease: %w", err)
+		}
+		defer done(context.WithoutCancel(ctx))
+		ctx = leaseCtx
 	}
-	mountList, release, err := mountable.Mount()
+
+	// Create a transient View on top of the committed snapshot. This
+	// never modifies the committed snapshot — View is a read-only
+	// child that lets us call Mounts() and see the overlay stack. We
+	// Remove() the view at the end. Using identity.NewID() so concurrent
+	// GetLayerPaths calls for the same image don't collide.
+	viewKey := "nitrobox-layers-" + identity.NewID()
+	mountable, err := s.snapshotter.View(ctx, viewKey, snapshotID)
 	if err != nil {
-		return nil, fmt.Errorf("get mounts: %w", err)
+		return nil, fmt.Errorf("snapshotter view chain %s (snapshot %s): %w",
+			finalChainID[:20], snapshotID[:20], err)
+	}
+	defer func() {
+		_ = s.snapshotter.Remove(context.WithoutCancel(ctx), viewKey)
+	}()
+	mounts, release, err := mountable.Mount()
+	if err != nil {
+		return nil, fmt.Errorf("mount view: %w", err)
 	}
 	defer release()
 
 	// Parse overlay mount options to extract layer paths
 	var paths []string
-	for _, m := range mountList {
+	for _, m := range mounts {
 		if m.Type == "bind" {
 			paths = append(paths, m.Source)
 		} else if m.Type == "overlay" {

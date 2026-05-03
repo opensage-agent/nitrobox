@@ -9,6 +9,7 @@ from __future__ import annotations
 import errno
 import logging
 import os
+import queue
 import select
 import shlex
 import threading
@@ -18,6 +19,65 @@ from typing import TypedDict
 from nitrobox._errors import SandboxInitError
 
 logger = logging.getLogger(__name__)
+
+
+# ======================================================================
+# Spawn worker — single long-lived thread that owns ALL fork() calls
+# ======================================================================
+#
+# Rust ``init.rs`` sets ``PR_SET_PDEATHSIG`` on the spawned shell so that
+# orphan bash processes get SIGKILLed when their parent dies. The Linux
+# kernel interprets "parent" at the **task** level, not the **process**
+# level — so if py_spawn_sandbox is invoked from a transient worker
+# thread (e.g. ``asyncio.to_thread`` inside ``asyncio.run``), the shell
+# dies the moment that worker thread exits. asyncio's
+# ``shutdown_default_executor`` joins all worker threads when the loop
+# closes, which is exactly what made DT-Agent's per-env
+# ``asyncio.run(backend.start(...))`` kill salesforce's apache between
+# env-startup calls.
+#
+# Fix: marshal every spawn through one daemon thread that lives for the
+# lifetime of the Python process. PDEATHSIG then chains to that worker,
+# which only dies when Python itself does — preserving the original
+# crash-cleanup intent without the per-asyncio-call breakage.
+
+_spawn_worker_lock = threading.Lock()
+_spawn_worker_thread: threading.Thread | None = None
+_spawn_worker_queue: "queue.Queue[tuple[SpawnConfig, queue.Queue]]" = queue.Queue()
+
+
+def _spawn_worker_loop() -> None:
+    while True:
+        config, reply = _spawn_worker_queue.get()
+        try:
+            from nitrobox._core import py_spawn_sandbox
+            reply.put(("ok", py_spawn_sandbox(config)))
+        except BaseException as e:
+            reply.put(("err", e))
+
+
+def _spawn_via_worker(config: "SpawnConfig"):
+    """Run ``py_spawn_sandbox`` from the singleton long-lived spawn thread.
+
+    Required so that PR_SET_PDEATHSIG (set inside the Rust init code on
+    the freshly forked sandbox) doesn't fire when a transient caller
+    thread is joined — see module docstring.
+    """
+    global _spawn_worker_thread
+    with _spawn_worker_lock:
+        if _spawn_worker_thread is None or not _spawn_worker_thread.is_alive():
+            _spawn_worker_thread = threading.Thread(
+                target=_spawn_worker_loop,
+                name="nbx-spawn-worker",
+                daemon=True,
+            )
+            _spawn_worker_thread.start()
+    reply: queue.Queue = queue.Queue(maxsize=1)
+    _spawn_worker_queue.put((config, reply))
+    status, payload = reply.get()
+    if status == "err":
+        raise payload
+    return payload
 
 
 # ======================================================================
@@ -117,8 +177,10 @@ class _PersistentShell:
         if self.pid is not None and self.alive:
             self.kill()
 
-        from nitrobox._core import py_spawn_sandbox
-        result = py_spawn_sandbox(self._config)
+        # Marshal through the singleton spawn thread so PDEATHSIG
+        # doesn't fire when a transient caller (asyncio worker, etc.)
+        # exits. See module-level docstring.
+        result = _spawn_via_worker(self._config)
 
         self.pid = result.pid
         self._stdin_fd = result.stdin_fd
